@@ -3,6 +3,9 @@ import {
   View, Text, Pressable, StyleSheet,
   type GestureResponderEvent, type StyleProp, type ViewStyle,
 } from "react-native";
+import Animated, {
+  useDerivedValue, useAnimatedStyle, type SharedValue,
+} from "react-native-reanimated";
 import Svg, { Path, G, Rect } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
@@ -48,9 +51,10 @@ function PlaceholderWave() {
   );
 }
 
-// Real waveform from decoded PCM peaks. Bars before the playhead are accent,
-// the rest are white — so the colour fills as the track plays.
-function PeaksWave({ peaks, playedFraction }: { peaks: number[]; playedFraction: number }) {
+// Real waveform from decoded PCM peaks, in a single colour. Progress is shown
+// by overlaying an accent copy clipped to the played fraction (see below) —
+// the SVG itself never re-renders while playing (WAV-22 perf).
+function PeaksWave({ peaks, color }: { peaks: number[]; color: string }) {
   const n = peaks.length;
   const slot = WAVE_W / n;
   const barW = Math.max(1.5, slot * 0.55);
@@ -60,37 +64,16 @@ function PeaksWave({ peaks, playedFraction }: { peaks: number[]; playedFraction:
         const h = Math.max(2, p * WAVE_H);
         const x = i * slot + (slot - barW) / 2;
         const y = (WAVE_H - h) / 2;
-        const played = i / n <= playedFraction;
-        return (
-          <Rect
-            key={i}
-            x={x}
-            y={y}
-            width={barW}
-            height={h}
-            rx={barW / 2}
-            fill={played ? COLORS.accent : COLORS.white}
-          />
-        );
+        return <Rect key={i} x={x} y={y} width={barW} height={h} rx={barW / 2} fill={color} />;
       })}
     </Svg>
   );
 }
 
-function Playhead({ fraction }: { fraction: number }) {
-  const left = Math.max(0, Math.min(1, fraction)) * WAVE_W - 1;
-  return (
-    <View pointerEvents="none" style={[styles.playheadWrap, { left }]}>
-      <Svg width={2} height={52} viewBox="0 0 2 52" fill="none">
-        <Path d="M1 51V1" stroke={COLORS.accent} strokeLinecap="round" strokeWidth={2} />
-      </Svg>
-    </View>
-  );
-}
-
 export type TimelineProps = {
   peaks?: number[];
-  position?: number;   // seconds
+  position?: number;   // seconds (React state, ~1 Hz — drives the mm:ss text)
+  positionSV?: SharedValue<number>; // seconds, per-frame — drives playhead/fill
   duration?: number;   // seconds
   isPlaying?: boolean;
   onPlay?: () => void;
@@ -102,6 +85,7 @@ export type TimelineProps = {
 export default function Timeline({
   peaks,
   position = 0,
+  positionSV,
   duration = 0,
   isPlaying = false,
   onPlay,
@@ -110,7 +94,27 @@ export default function Timeline({
   style,
 }: TimelineProps) {
   const hasSound = !!peaks && peaks.length > 0 && duration > 0;
-  const fraction = hasSound ? position / duration : 0;
+
+  // Played fraction on the UI thread: prefer the live shared value, fall back
+  // to the (slow) position prop when this timeline isn't the active player.
+  const fraction = useDerivedValue(() => {
+    const pos = positionSV ? positionSV.value : position;
+    const f = duration > 0 ? pos / duration : 0;
+    return f < 0 ? 0 : f > 1 ? 1 : f;
+  }, [positionSV, position, duration]);
+
+  // The accent overlay is clipped with two opposing translateX transforms
+  // (window slides right, wave counter-slides left) — pure transforms, so the
+  // per-frame cost is zero layout work on both threads.
+  const clipStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: (fraction.value - 1) * WAVE_W }],
+  }));
+  const counterStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: (1 - fraction.value) * WAVE_W }],
+  }));
+  const playheadStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: fraction.value * WAVE_W - 1 }],
+  }));
 
   const ticks = Array.from({ length: 7 }, (_, i) =>
     hasSound ? fmtTime((duration * i) / 6) : "0:00",
@@ -129,8 +133,23 @@ export default function Timeline({
   return (
     <View style={[styles.card, style]}>
       <Pressable style={styles.visualizer} onPress={handleSeek} disabled={!hasSound}>
-        {hasSound ? <PeaksWave peaks={peaks!} playedFraction={fraction} /> : <PlaceholderWave />}
-        {hasSound && <Playhead fraction={fraction} />}
+        {hasSound ? (
+          <>
+            <PeaksWave peaks={peaks!} color={COLORS.white} />
+            <Animated.View style={[styles.clip, clipStyle]} pointerEvents="none">
+              <Animated.View style={counterStyle}>
+                <PeaksWave peaks={peaks!} color={COLORS.accent} />
+              </Animated.View>
+            </Animated.View>
+            <Animated.View pointerEvents="none" style={[styles.playheadWrap, playheadStyle]}>
+              <Svg width={2} height={52} viewBox="0 0 2 52" fill="none">
+                <Path d="M1 51V1" stroke={COLORS.accent} strokeLinecap="round" strokeWidth={2} />
+              </Svg>
+            </Animated.View>
+          </>
+        ) : (
+          <PlaceholderWave />
+        )}
       </Pressable>
 
       <View style={styles.timeStrip}>
@@ -173,7 +192,11 @@ const styles = StyleSheet.create({
     ...panelSurface,
   },
   visualizer: { width: WAVE_W, height: WAVE_H, overflow: "hidden", justifyContent: "center" },
-  playheadWrap: { position: "absolute", top: "50%", width: 2, height: 52, marginTop: -26 },
+  clip: {
+    position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+    overflow: "hidden", justifyContent: "center",
+  },
+  playheadWrap: { position: "absolute", left: 0, top: "50%", width: 2, height: 52, marginTop: -26 },
   timeStrip: { width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   timeTick: { fontFamily: FONT.geistRegular, fontSize: 12, color: COLORS.white, textAlign: "center" },
   interactables: { width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10 },

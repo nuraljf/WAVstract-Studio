@@ -1,12 +1,16 @@
 // Filters row + 3-state list. States in the Figma:
 //   - unselected : transparent (no surface), just album art + title + duration + play
 //   - playing    : flat dark card with thin stroke
-//   - editing    : 3 chips side-by-side (base card | red-heart pill | red Delete pill)
+//   - editing    : swipe LEFT on a row to reveal the actions (heart pill +
+//                  red Delete pill, Figma node 199:252); swipe right / tap closes
 import React from "react";
 import { View, Text, Image, Pressable, StyleSheet, type StyleProp, type ViewStyle } from "react-native";
 import Animated, {
-  useSharedValue, useAnimatedStyle, withSpring, withTiming, withSequence,
+  useSharedValue, useAnimatedStyle, useAnimatedReaction,
+  withSpring, withTiming, withSequence, runOnJS,
+  LinearTransition, type SharedValue,
 } from "react-native-reanimated";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Svg, { Rect } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
@@ -37,14 +41,21 @@ function CoverArt({ uri }: { uri?: string | null }) {
 // Real per-row visualizer (WAV-17). Static loudness sparkline from PCM peaks at
 // 65% opacity when idle (emphasizes it isn't playing); when the row is playing
 // the bars move live with the audio via the engine's analyser, at full opacity.
+// Element sources (video files) have no analyser tap — they keep the static
+// bars and skip the rAF loop entirely (WAV-22 perf).
 const MINI_N = 9;
 function MiniWave({ peaks, playing }: { peaks?: number[]; playing?: boolean }) {
   const [live, setLive] = React.useState<number[] | null>(null);
   React.useEffect(() => {
-    if (!playing) { setLive(null); return; }
+    if (!playing || !player.hasLiveLevels) {
+      setLive(null);
+      return;
+    }
     let raf = 0;
+    let frame = 0;
     const loop = () => {
-      setLive(player.levels(MINI_N));
+      // every 3rd frame (~20fps) — indistinguishable on a 20px meter, third the work
+      if (++frame % 3 === 0) setLive(player.levels(MINI_N));
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -92,6 +103,22 @@ function rowEntering() {
       transform: [
         { scale: withSpring(1, SPRING.bouncy) },
         { translateY: withSpring(0, SPRING.bouncy) },
+      ],
+    },
+  };
+}
+
+// Deleted row: quick scale-down + fade (the inverse of the entrance); the
+// rows below spring up into the gap via the list's layout transition.
+function rowExiting() {
+  "worklet";
+  return {
+    initialValues: { opacity: 1, transform: [{ scale: 1 }, { translateY: 0 }] },
+    animations: {
+      opacity: withTiming(0, { duration: 220 }),
+      transform: [
+        { scale: withTiming(0.9, { duration: 220 }) },
+        { translateY: withTiming(6, { duration: 220 }) },
       ],
     },
   };
@@ -152,6 +179,7 @@ type RowProps = {
   duration?: string;
   cover?: string | null;
   peaks?: number[];
+  favorite?: boolean;
   onPlay?: () => void;
   onAdd?: () => void;
   style?: StyleProp<ViewStyle>;
@@ -162,32 +190,61 @@ function RowInner({
   duration = "00:00",
   cover,
   peaks,
+  favorite = false,
   onPlay,
   onAdd,
   glass = false,
   playing = false,
+  editing = false,
+  editProgress,
   onHoverIn,
   onHoverOut,
-}: RowProps & { glass?: boolean; playing?: boolean; onHoverIn?: () => void; onHoverOut?: () => void }) {
+}: RowProps & {
+  glass?: boolean;
+  playing?: boolean;
+  editing?: boolean;
+  editProgress?: SharedValue<number>;
+  onHoverIn?: () => void;
+  onHoverOut?: () => void;
+}) {
+  // Editing base shows only cover + title (Figma 199:253) — the wave and the
+  // duration/+ tail fade AND collapse as the swipe progresses, so the title
+  // keeps the room the actions take away.
+  const fallback = useSharedValue(0);
+  const edit = editProgress ?? fallback;
+  const waveCollapse = useAnimatedStyle(() => {
+    const e = Math.min(edit.value, 1);
+    return { opacity: 1 - e };
+  });
+  const tailCollapse = useAnimatedStyle(() => {
+    const e = Math.min(edit.value, 1);
+    return { opacity: 1 - e, maxWidth: 120 * (1 - e) };
+  });
+
   return (
-    <Pressable
+    <PressableScale
       style={[styles.rowInner, glass && styles.rowInnerCard]}
+      scaleTo={0.98}
+      dim={0.05}
       onPress={onPlay}
       onHoverIn={onHoverIn}
       onHoverOut={onHoverOut}
     >
       <CoverArt uri={cover} />
-      <MiniWave peaks={peaks} playing={playing} />
+      <Animated.View style={waveCollapse}>
+        <MiniWave peaks={peaks} playing={playing} />
+      </Animated.View>
       <Text style={styles.rowTitle} numberOfLines={1} ellipsizeMode="tail">{title}</Text>
-      <View style={styles.rowTail}>
+      <Animated.View style={[styles.rowTail, tailCollapse]} pointerEvents={editing ? "none" : "auto"}>
+        {favorite && <HeartIcon size={12} />}
         <Text style={styles.rowDuration}>{duration}</Text>
         <PressableScale onPress={onAdd} style={styles.addBtn}>
           <PlusIcon size={20} />
           <GlassEdge radius={34} />
         </PressableScale>
-      </View>
+      </Animated.View>
       {glass && <GlassEdge radius={16} />}
-    </Pressable>
+    </PressableScale>
   );
 }
 
@@ -207,23 +264,117 @@ export function ListRowPlaying(p: RowProps) {
   );
 }
 
-// Data-driven row. The glass "selected" surface shows only while playing or
-// hovered (WAV-17); otherwise it's the flat unselected state.
-export function ListRow({ playing, ...p }: RowProps & { playing?: boolean }) {
+// Swipe-to-edit geometry (Figma 199:252): heart circle + Delete pill + gaps.
+const FAV_W = 40;
+const DEL_W = 100;
+const AGAP = 10;
+const REVEAL = FAV_W + AGAP + DEL_W + AGAP; // width the base card gives up
+
+// Data-driven row. The glass "selected" surface shows while playing, hovered
+// (WAV-17) or in the swipe-open editing state (WAV-24); otherwise it's the
+// flat unselected state.
+export function ListRow({
+  playing,
+  onDelete,
+  onFavorite,
+  ...p
+}: RowProps & {
+  playing?: boolean;
+  onDelete?: () => void;
+  onFavorite?: () => void;
+}) {
   const [hovered, setHovered] = React.useState(false);
+  const [editing, setEditing] = React.useState(false);
+  const open = useSharedValue(0); // 0 closed … 1 actions revealed (>1 = rubber)
+  const start = useSharedValue(0);
+
+  useAnimatedReaction(
+    () => open.value > 0.03,
+    (now, prev) => {
+      if (now !== prev) runOnJS(setEditing)(now);
+    },
+  );
+
+  const close = React.useCallback(() => {
+    open.value = withSpring(0, SPRING.snappy);
+  }, [open]);
+
+  // Horizontal-only pan: a vertical move fails the gesture so the list still
+  // scrolls; a sub-threshold move stays a tap (play / close).
+  const pan = Gesture.Pan()
+    .activeOffsetX([-16, 16])
+    .failOffsetY([-12, 12])
+    .onStart(() => {
+      start.value = open.value;
+    })
+    .onUpdate((e) => {
+      const raw = start.value - e.translationX / REVEAL;
+      open.value = raw < 0 ? 0 : raw > 1.12 ? 1.12 : raw; // rubber past fully-open
+    })
+    .onEnd((e) => {
+      const opening = e.velocityX < -300 || (open.value > 0.5 && e.velocityX < 300);
+      open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
+    });
+
+  const baseStyle = useAnimatedStyle(() => ({
+    marginRight: Math.min(open.value, 1.12) * REVEAL,
+  }));
+  // Actions slide in from the right, fading + scaling up — the same reveal
+  // language as the slider tooltip and the row entrance.
+  const actionsStyle = useAnimatedStyle(() => {
+    const e = Math.min(open.value, 1);
+    return {
+      opacity: Math.min(1, e * 1.4),
+      transform: [{ translateX: (1 - e) * 28 }, { scale: 0.92 + e * 0.08 }],
+    };
+  });
+
   return (
-    <Animated.View entering={rowEntering as any} style={[styles.rowOuter, p.style]}>
-      <RowInner
-        {...p}
-        glass={!!playing || hovered}
-        playing={!!playing}
-        onHoverIn={() => setHovered(true)}
-        onHoverOut={() => setHovered(false)}
-      />
+    <Animated.View
+      entering={rowEntering as any}
+      exiting={rowExiting as any}
+      layout={LinearTransition.springify()}
+      style={[styles.rowOuter, styles.rowSwipeOuter, p.style]}
+    >
+      <View style={styles.actionsWrap} pointerEvents={editing ? "auto" : "none"}>
+        <Animated.View style={[styles.actionsRow, actionsStyle]}>
+          <PressableScale
+            onPress={() => {
+              onFavorite?.();
+              close();
+            }}
+            style={styles.favoriteCircle}
+          >
+            <HeartIcon size={20} />
+            <GlassEdge radius={34} />
+          </PressableScale>
+          <PressableScale onPress={onDelete} style={styles.deleteBtn}>
+            <TrashIcon size={24} />
+            <Text style={styles.deleteLabel}>Delete</Text>
+            <GlassEdge radius={16} />
+          </PressableScale>
+        </Animated.View>
+      </View>
+
+      <GestureDetector gesture={pan}>
+        <Animated.View style={[styles.baseWrap, baseStyle]}>
+          <RowInner
+            {...p}
+            glass={!!playing || hovered || editing}
+            playing={!!playing}
+            editing={editing}
+            editProgress={open}
+            onPlay={editing ? close : p.onPlay}
+            onHoverIn={() => setHovered(true)}
+            onHoverOut={() => setHovered(false)}
+          />
+        </Animated.View>
+      </GestureDetector>
     </Animated.View>
   );
 }
 
+// Static editing-state variant (design reference / DevTools).
 export function ListRowEditing({
   title,
   onFavorite,
@@ -295,6 +446,8 @@ const styles = StyleSheet.create({
 
   // rows
   rowOuter: { width: "100%", borderRadius: 16 },
+  rowSwipeOuter: { flexDirection: "row" },
+  baseWrap: { flex: 1 },
   rowInner: {
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     gap: 5, padding: 10, borderRadius: 16, overflow: "hidden",
@@ -303,13 +456,25 @@ const styles = StyleSheet.create({
   albumArt: { width: 40, height: 40, borderRadius: 8 },
   coverGlyph: { alignItems: "center", justifyContent: "center", backgroundColor: COLORS.white10 },
   rowTitle: { flex: 1, minWidth: 0, fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "left" },
-  rowTail: { flexShrink: 0, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 10 },
+  rowTail: {
+    flexShrink: 0, flexDirection: "row", alignItems: "center", justifyContent: "flex-end",
+    gap: 10, overflow: "hidden",
+  },
   rowDuration: { fontFamily: FONT.geistRegular, fontSize: 16, color: COLORS.white80, textAlign: "center" },
   addBtn: {
     width: 35, height: 35, borderRadius: 34,
     alignItems: "center", justifyContent: "center", overflow: "hidden",
     ...accentSurface,
   },
+
+  // swipe-revealed actions (pinned behind the base, right-aligned)
+  actionsWrap: {
+    position: "absolute", right: 0, top: 0, bottom: 0,
+    width: FAV_W + AGAP + DEL_W,
+    alignItems: "center", justifyContent: "flex-end",
+    flexDirection: "row",
+  },
+  actionsRow: { flexDirection: "row", alignItems: "center", gap: AGAP, height: "100%" },
 
   // edit row — all three chips are 60px tall (favorite is 40, centered)
   editRow: { width: "100%", height: 60, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
@@ -320,14 +485,15 @@ const styles = StyleSheet.create({
     ...panelSurface,
   },
   favoriteCircle: {
-    width: 40, height: 40, borderRadius: 34,
+    width: FAV_W, height: 40, borderRadius: 34,
+    alignSelf: "center",
     alignItems: "center", justifyContent: "center", overflow: "hidden",
     ...panelSurface,
   },
   deleteBtn: {
-    height: 60,
+    width: DEL_W, height: "100%",
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5,
-    paddingHorizontal: 16,
+    padding: 10,
     borderRadius: 16, overflow: "hidden",
     ...dangerSurface,
   },

@@ -16,8 +16,8 @@ import { useStudio, fmtTime } from "../../lib/use-studio";
 export default function StudioScreen() {
   const [tab, setTab] = useState<TabKey>("studio");
   const {
-    sounds, activeId, isPlaying, position, timelineSound, supported,
-    extract, togglePlay, addToTimeline, seek, setSpeed,
+    sounds, activeId, isPlaying, position, positionSV, timelineSound, supported,
+    extract, togglePlay, addToTimeline, removeSound, toggleFavorite, seek, setSpeed,
   } = useStudio();
 
   // The Timeline only reflects live playback when ITS sound is the one loaded in
@@ -35,6 +35,7 @@ export default function StudioScreen() {
             <Timeline
               peaks={timelineSound?.peaks}
               position={timelineActive ? position : 0}
+              positionSV={timelineActive ? positionSV : undefined}
               duration={timelineSound?.duration ?? 0}
               isPlaying={timelineActive && isPlaying}
               onPlay={() => timelineSound && togglePlay(timelineSound.id)}
@@ -68,9 +69,12 @@ export default function StudioScreen() {
                     duration={fmtTime(s.duration)}
                     cover={s.cover}
                     peaks={s.peaks}
+                    favorite={s.favorite}
                     playing={isPlaying && s.id === activeId}
                     onPlay={() => togglePlay(s.id)}
                     onAdd={() => addToTimeline(s.id)}
+                    onDelete={() => removeSound(s.id)}
+                    onFavorite={() => toggleFavorite(s.id)}
                   />
                 ))
               )}

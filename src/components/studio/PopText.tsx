@@ -1,9 +1,10 @@
-// Apple-style numeric text transition (WAV-15). Replicates SwiftUI's
-// `.contentTransition(.numericText())`: whenever the value changes, the old
-// value rolls *out* and the new value rolls *in* from the opposite edge — the
-// direction follows whether the number went up or down — with a fully-damped
-// `.smooth` spring. Reads like the iOS timer / Now Playing elapsed counter
-// rather than a hard text swap.
+// Apple-style numeric text transition (WAV-15 / WAV-23). Replicates SwiftUI's
+// `.contentTransition(.numericText())` — PER CHARACTER: when the value
+// changes, only the characters that actually differ roll (old glyph out, new
+// glyph in from the opposite edge), while the rest of the string stays put.
+// So 0:00 → 0:01 moves just the final "1", and 0:19 → 0:20 rolls only the
+// last two digits — like the iOS timer / Now Playing elapsed counter.
+// Direction follows whether the overall number went up or down.
 import React, { useEffect, useRef, useState } from "react";
 import { StyleSheet, type StyleProp, type TextStyle } from "react-native";
 import Animated, {
@@ -20,60 +21,56 @@ function numericDir(a: string, b: string): number {
   return 1;
 }
 
-export function PopText({
-  children,
+// One character cell. Rolls only when ITS character changes; an unchanged
+// cell renders completely static (no animation, no overlay).
+function RollChar({
+  char,
+  dir,
+  travel,
   style,
-  intensity = 1,
 }: {
-  children: React.ReactNode;
+  char: string;
+  dir: number;
+  travel: number;
   style?: StyleProp<TextStyle>;
-  intensity?: number; // 0..1 scale of the travel distance (1 = full)
 }) {
-  // `value` is the flattened string (used only to detect changes / direction);
-  // the actual `children` nodes are what we render, so `{n}x` stays "1.0x".
-  const value = React.Children.toArray(children).map(String).join("");
-  const flat = (StyleSheet.flatten(style) ?? {}) as TextStyle;
-  const travel = ((flat.fontSize as number) ?? 16) * 0.6 * intensity;
-
-  const prevValue = useRef(value);
-  const prevChildren = useRef(children);
-  const [outgoing, setOutgoing] = useState<React.ReactNode>(null);
-  const dir = useSharedValue(1);
+  const prevChar = useRef(char);
+  const [outgoing, setOutgoing] = useState<string | null>(null);
+  const d = useSharedValue(1);
   const p = useSharedValue(1); // 0 = mid-transition, 1 = settled
 
   useEffect(() => {
-    if (prevValue.current === value) return;
-    dir.value = numericDir(prevValue.current, value);
-    setOutgoing(prevChildren.current);
-    prevValue.current = value;
-    prevChildren.current = children;
+    if (prevChar.current === char) return;
+    d.value = dir;
+    setOutgoing(prevChar.current);
+    prevChar.current = char;
     p.value = 0;
     p.value = withSpring(1, SPRING.smooth);
-  }, [value, children, dir, p]);
+  }, [char, dir, d, p]);
 
-  // New value: rises in from `dir` side, fades + scales up to rest.
+  // New glyph: rises in from `dir` side, fades + scales up to rest.
   const incoming = useAnimatedStyle(() => ({
     opacity: p.value,
     transform: [
-      { translateY: (1 - p.value) * dir.value * travel },
+      { translateY: (1 - p.value) * d.value * travel },
       { scale: 0.9 + p.value * 0.1 },
     ],
   }));
-  // Old value: continues past in the same direction, fades + scales down.
+  // Old glyph: continues past in the same direction, fades + scales down.
   const leaving = useAnimatedStyle(() => ({
     opacity: 1 - p.value,
     transform: [
-      { translateY: -p.value * dir.value * travel },
+      { translateY: -p.value * d.value * travel },
       { scale: 1 - p.value * 0.1 },
     ],
   }));
 
   return (
-    <Animated.View style={styles.wrap}>
-      <Animated.Text style={[style, incoming]}>{children}</Animated.Text>
+    <Animated.View style={styles.cell}>
+      <Animated.Text style={[style, styles.char, incoming]}>{char}</Animated.Text>
       {outgoing != null && (
         <Animated.Text
-          style={[style, styles.overlay, { textAlign: flat.textAlign }, leaving]}
+          style={[style, styles.char, styles.overlay, leaving]}
           pointerEvents="none"
         >
           {outgoing}
@@ -83,9 +80,52 @@ export function PopText({
   );
 }
 
+export function PopText({
+  children,
+  style,
+  intensity = 1,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<TextStyle>;
+  intensity?: number; // 0..1 scale of the travel distance (1 = full)
+}) {
+  const value = React.Children.toArray(children).map(String).join("");
+  const flat = (StyleSheet.flatten(style) ?? {}) as TextStyle;
+  const travel = ((flat.fontSize as number) ?? 16) * 0.6 * intensity;
+
+  // Direction is decided once per value change (whole-number comparison) and
+  // shared by every rolling cell so they all travel the same way.
+  const prevValue = useRef(value);
+  const dirRef = useRef(1);
+  if (prevValue.current !== value) {
+    dirRef.current = numericDir(prevValue.current, value);
+    prevValue.current = value;
+  }
+
+  // Cells are matched by index; if the string length changes (rare — e.g.
+  // 9:59 → 10:00) the keys shift and every cell remounts, which reads as a
+  // clean swap instead of a mismatched roll.
+  const chars = value.split("");
+  return (
+    <Animated.View style={styles.wrap}>
+      {chars.map((c, i) => (
+        <RollChar
+          key={`${chars.length}:${i}`}
+          char={c}
+          dir={dirRef.current}
+          travel={travel}
+          style={style}
+        />
+      ))}
+    </Animated.View>
+  );
+}
+
 const styles = StyleSheet.create({
-  // sizes to the incoming value; the outgoing copy overlays it absolutely so
-  // the two never push layout around as they cross.
   wrap: { position: "relative", flexDirection: "row" },
+  // each cell sizes to its incoming glyph; the outgoing copy overlays it
+  // absolutely so the two never push layout around as they cross.
+  cell: { position: "relative" },
+  char: { textAlign: "center" },
   overlay: { position: "absolute", left: 0, right: 0, top: 0 },
 });

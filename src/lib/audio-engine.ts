@@ -240,6 +240,7 @@ export async function extractCover(file: File): Promise<string | null> {
 
 type EndedCb = () => void;
 type TickCb = (position: number) => void;
+type DurationCb = (duration: number) => void;
 
 class Player {
   private mode: "buffer" | "element" = "buffer";
@@ -247,9 +248,12 @@ class Player {
   private buffer: AudioBuffer | null = null;
   private source: AudioBufferSourceNode | null = null;
 
-  // element-mode backing (video/audio tag routed through Web Audio)
+  // element-mode backing. The element plays DIRECTLY (never through
+  // createMediaElementSource): on iOS Safari that node fails to capture the
+  // element's own output, so the song played twice slightly offset (the
+  // "doubled / echo" bug, WAV-22) and rate changes stalled the pipeline.
+  // Cost: no live analyser bars for element sources — reliability wins.
   private el: HTMLMediaElement | null = null;
-  private elSource: MediaElementAudioSourceNode | null = null;
   private elDuration = 0;
 
   private gain: GainNode | null = null;
@@ -266,6 +270,10 @@ class Player {
 
   onEnded: EndedCb | null = null;
   onTick: TickCb | null = null;
+  // Fired when an element source learns its REAL duration from the media
+  // pipeline (loadedmetadata/durationchange). The upfront metadata probe can be
+  // wrong/zero on iOS, which made the timeline outlive the audio (WAV-22).
+  onDuration: DurationCb | null = null;
 
   get duration(): number {
     return this.mode === "element" ? this.elDuration : (this.buffer?.duration ?? 0);
@@ -303,8 +311,15 @@ class Player {
     return this.gain;
   }
 
+  /** Whether levels() can produce live data (buffer mode only — element
+   *  sources play outside the Web Audio graph, see the class comment). */
+  get hasLiveLevels(): boolean {
+    return this.mode === "buffer";
+  }
+
   /** Live frequency magnitudes (0..1), downsampled to `n` bars. Empty when idle. */
   levels(n = 9): number[] {
+    if (this.mode === "element") return [];
     if (!this.analyser || !this.freq || !this.playing) return [];
     this.analyser.getByteFrequencyData(this.freq);
     const bins = this.freq.length;
@@ -335,15 +350,12 @@ class Player {
       return;
     }
 
-    // element mode: play the original file through a media element, routed into
-    // the same gain → analyser graph so the live visualizer still works.
+    // element mode: play the original file straight through a media element.
     this.mode = "element";
     this.buffer = null;
     this.elDuration = source.duration;
 
-    const ctx = getCtx();
     const el = document.createElement("video");
-    el.src = source.url;
     el.preload = "auto";
     (el as any).playsInline = true; // iOS: don't hijack into fullscreen
     el.style.display = "none";
@@ -355,9 +367,19 @@ class Player {
       this.onTick?.(this.duration);
       this.onEnded?.();
     };
+    // The media pipeline is the only honest source of duration for element
+    // files — adopt it as soon as (and whenever) it's known.
+    const adoptDuration = () => {
+      const d = el.duration;
+      if (Number.isFinite(d) && d > 0 && Math.abs(d - this.elDuration) > 0.05) {
+        this.elDuration = d;
+        this.onDuration?.(d);
+      }
+    };
+    el.onloadedmetadata = adoptDuration;
+    el.ondurationchange = adoptDuration;
     if (typeof document !== "undefined") document.body.appendChild(el);
-    this.elSource = ctx.createMediaElementSource(el);
-    this.elSource.connect(this.ensureGain());
+    el.src = source.url;
     this.el = el;
   }
 
@@ -372,8 +394,11 @@ class Player {
       if (!Number.isFinite(off)) off = 0;
       if (off >= this.duration - 0.01) off = 0;
       try { this.el.currentTime = off; } catch { /* not seekable yet */ }
+      // iOS resets preservesPitch behind our back on some pipeline restarts —
+      // re-assert it with the rate every time we start.
+      setPreservesPitch(this.el, false);
       this.el.playbackRate = this.rate;
-      void this.el.play();
+      void this.el.play().catch(() => {});
       this.playing = true;
       return;
     }
@@ -448,7 +473,10 @@ class Player {
    */
   setRate(rate: number) {
     if (this.mode === "element") {
-      if (this.el) this.el.playbackRate = rate; // element tracks its own clock
+      if (this.el) {
+        setPreservesPitch(this.el, false); // iOS: must hold across rate changes
+        this.el.playbackRate = rate; // element tracks its own clock
+      }
       this.rate = rate;
       return;
     }
@@ -465,6 +493,16 @@ class Player {
     this.volume = clamp(v, 0, 1);
     if (this.gain) this.gain.gain.value = this.volume;
     if (this.el) this.el.volume = this.volume;
+  }
+
+  /** Fully drop the loaded sound (used when its row is deleted, WAV-24). */
+  unload() {
+    this.stopSource();
+    this.teardownElement();
+    this.buffer = null;
+    this.elDuration = 0;
+    this.startOffset = 0;
+    this.playing = false;
   }
 
   private stopSource() {
@@ -487,18 +525,23 @@ class Player {
     try {
       this.el.pause();
       this.el.onended = null;
+      this.el.onloadedmetadata = null;
+      this.el.ondurationchange = null;
     } catch {
       /* ignore */
     }
+    // iOS keeps a hard cap on simultaneously-open media pipelines; detach the
+    // src and force a load so the decoder slot is actually released (a leaked
+    // slot is one way "add a sound" silently stops working, WAV-22).
     try {
-      this.elSource?.disconnect();
+      this.el.removeAttribute("src");
+      this.el.load();
     } catch {
       /* ignore */
     }
     this.el.remove();
     // Note: the source's object URL is intentionally NOT revoked — the same
     // Sound may be selected again later and reloaded from it.
-    this.elSource = null;
     this.el = null;
   }
 }
