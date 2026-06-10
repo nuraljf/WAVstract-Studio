@@ -41,3 +41,10 @@ example
 # generated native folders
 /ios
 /android
+
+# design handoff reference (kept locally, not committed)
+.handoff/
+.handoff2/
+.handoff3/
+figma-timeline.png
+uikit.png
