@@ -7,6 +7,7 @@ import Animated, {
   useSharedValue, useAnimatedStyle, withRepeat, withSequence, withTiming, withDelay,
   Easing, cancelAnimation,
 } from "react-native-reanimated";
+import { AmbientGradient } from "./AmbientGradient";
 
 // Geometry from the Figma asset (24×24): five rounded bars of varying height.
 const BAR_W = 3 / 24;
@@ -100,15 +101,34 @@ export function ShimmerText({ children, style }: { children: React.ReactNode; st
   );
 }
 
-/** Full-screen boot/loading takeover (Figma 237:761) — black, bars centered. */
+/** Frosted overlay for the universal loading / failed states (Figma 237:761):
+ *  the screen underneath stays visible but heavily blurred + dimmed, with the
+ *  state content centered on top. */
+export function BlurVeil({ children }: { children: React.ReactNode }) {
+  return <View style={styles.veil}>{children}</View>;
+}
+
+/** Full-screen boot takeover — the living gradient under the frosted veil
+ *  with the bars centered, matching the loading-state design language. */
 export function LoadingScreen() {
   return (
     <View style={styles.full}>
-      <LoadingBars size={28} />
+      <AmbientGradient />
+      <BlurVeil>
+        <LoadingBars size={28} />
+      </BlurVeil>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  full: { flex: 1, backgroundColor: "#050505", alignItems: "center", justifyContent: "center" },
+  full: { flex: 1, backgroundColor: "#050505", overflow: "hidden" },
+  veil: {
+    position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: "rgba(5,5,5,0.35)",
+    ...(Platform.OS === "web"
+      ? ({ backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)" } as object)
+      : ({ backgroundColor: "rgba(5,5,5,0.8)" } as object)),
+  },
 });

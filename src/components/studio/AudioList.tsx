@@ -7,13 +7,14 @@ import React from "react";
 import { View, Text, Image, Pressable, StyleSheet, type StyleProp, type ViewStyle } from "react-native";
 import Animated, {
   useSharedValue, useAnimatedStyle, useAnimatedReaction,
-  withSpring, withTiming, withSequence, runOnJS,
+  withSpring, withTiming, withSequence, runOnJS, Easing,
   LinearTransition, type SharedValue,
 } from "react-native-reanimated";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Svg, { Rect } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
+import { PopText } from "./PopText";
 import {
   DownloadIcon, HeartIcon, FilterIcon, ChevronDownIcon, TrashIcon,
   PlusIcon, AudioBarsIcon, StudioIcon,
@@ -220,13 +221,13 @@ function RowInner({
 }) {
   const busy = sync === "uploading" || sync === "downloading";
   // Editing base shows only cover + title (Figma 199:253) — the wave and the
-  // duration/+ tail fade AND collapse as the swipe progresses, so the title
-  // keeps the room the actions take away.
+  // duration/+ tail fade AND collapse as the swipe progresses; the wave also
+  // gives up its width so the title slides over to keep the spacing even.
   const fallback = useSharedValue(0);
   const edit = editProgress ?? fallback;
   const waveCollapse = useAnimatedStyle(() => {
     const e = Math.min(edit.value, 1);
-    return { opacity: 1 - e };
+    return { opacity: 1 - e, maxWidth: 20 * (1 - e) };
   });
   const tailCollapse = useAnimatedStyle(() => {
     const e = Math.min(edit.value, 1);
@@ -277,7 +278,9 @@ function RowInner({
           <Text style={styles.rowTitle} numberOfLines={1} ellipsizeMode="tail">{title}</Text>
           <Animated.View style={[styles.rowTail, tailCollapse]} pointerEvents={editing ? "none" : "auto"}>
             {favorite && <HeartIcon size={12} />}
-            <Text style={styles.rowDuration}>{duration}</Text>
+            {/* total length at rest; rolls the live elapsed second while this
+                row is the one playing (per-char roll, WAV-23 language) */}
+            <PopText style={styles.rowDuration}>{duration}</PopText>
             <PressableScale onPress={onAdd} style={styles.addBtn}>
               <PlusIcon size={20} />
               <GlassEdge radius={34} />
@@ -341,32 +344,54 @@ export function ListRow({
     open.value = withSpring(0, SPRING.snappy);
   }, [open]);
 
+  // Ghost heart (favorite UX): on favoriting, a copy of the heart pops out of
+  // the button — swells, floats up and dissolves.
+  const ghost = useSharedValue(1);
+  const popGhost = React.useCallback(() => {
+    ghost.value = 0;
+    ghost.value = withTiming(1, { duration: 650, easing: Easing.out(Easing.quad) });
+  }, [ghost]);
+  const ghostStyle = useAnimatedStyle(() => ({
+    opacity: ghost.value >= 1 ? 0 : 1 - ghost.value,
+    transform: [
+      { translateY: ghost.value * -13 },
+      { scale: 1 + ghost.value * 0.9 },
+    ],
+  }));
+
   // Horizontal-only pan: a vertical move fails the gesture so the list still
   // scrolls; a sub-threshold move stays a tap (play / close). The settle runs
   // in BOTH onEnd and onFinalize — a cancelled gesture (scroll steal, lost
   // pointer on iOS) skips onEnd, which is what left rows stranded mid-swipe.
-  const pan = Gesture.Pan()
-    .enabled(!busy)
-    .activeOffsetX([-16, 16])
-    .failOffsetY([-12, 12])
-    .shouldCancelWhenOutside(false)
-    .onStart(() => {
-      start.value = open.value;
-    })
-    .onUpdate((e) => {
-      const raw = start.value - e.translationX / REVEAL;
-      open.value = raw < 0 ? 0 : raw > 1.12 ? 1.12 : raw; // rubber past fully-open
-    })
-    .onEnd((e) => {
-      const opening = e.velocityX < -300 || (open.value > 0.5 && e.velocityX < 300);
-      open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
-    })
-    .onFinalize((_e, success) => {
-      if (!success) {
-        // gesture cancelled before onEnd — always finish to a resting state
-        open.value = withSpring(open.value > 0.5 ? 1 : 0, SPRING.snappy);
-      }
-    });
+  // Memoized so re-renders (e.g. the playing row's elapsed-time tick) don't
+  // reattach the handler — a reattach mid-scroll killed list scrolling while
+  // a sound was playing.
+  const pan = React.useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(!busy)
+        .activeOffsetX([-16, 16])
+        .failOffsetY([-12, 12])
+        .shouldCancelWhenOutside(false)
+        .onStart(() => {
+          start.value = open.value;
+        })
+        .onUpdate((e) => {
+          const raw = start.value - e.translationX / REVEAL;
+          open.value = raw < 0 ? 0 : raw > 1.12 ? 1.12 : raw; // rubber past fully-open
+        })
+        .onEnd((e) => {
+          const opening = e.velocityX < -300 || (open.value > 0.5 && e.velocityX < 300);
+          open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
+        })
+        .onFinalize((_e, success) => {
+          if (!success) {
+            // gesture cancelled before onEnd — always finish to a resting state
+            open.value = withSpring(open.value > 0.5 ? 1 : 0, SPRING.snappy);
+          }
+        }),
+    [busy, open, start],
+  );
 
   const baseStyle = useAnimatedStyle(() => ({
     marginRight: Math.min(open.value, 1.12) * REVEAL,
@@ -397,6 +422,7 @@ export function ListRow({
           <Animated.View style={heartStyle}>
             <PressableScale
               onPress={() => {
+                if (!p.favorite) popGhost(); // becoming a favorite → ghost pop
                 onFavorite?.();
                 close();
               }}
@@ -407,6 +433,9 @@ export function ListRow({
               <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
                 <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
               </View>
+              <Animated.View pointerEvents="none" style={[styles.ghostHeart, ghostStyle]}>
+                <HeartIcon size={20} color={COLORS.danger} />
+              </Animated.View>
               <GlassEdge radius={34} />
             </PressableScale>
           </Animated.View>
@@ -606,8 +635,11 @@ const styles = StyleSheet.create({
   favoriteCircle: {
     width: FAV_W, height: 40, borderRadius: 34,
     alignSelf: "center",
-    alignItems: "center", justifyContent: "center", overflow: "hidden",
+    alignItems: "center", justifyContent: "center",
     ...panelSurface,
+  },
+  ghostHeart: {
+    position: "absolute", top: 10, left: 10, // over the resting heart (40px chip, 20px icon)
   },
   deleteBtn: {
     width: DEL_W, height: "100%",

@@ -442,10 +442,12 @@ class Player {
     el.preload = "auto";
     (el as any).playsInline = true; // iOS: don't hijack into fullscreen
     el.style.display = "none";
+    el.loop = true; // playback loops forever (user pauses to stop)
     setPreservesPitch(el, false); // rate changes pitch too (slowed / nightcore)
     el.playbackRate = this.rate;
     el.volume = this.volume;
     el.onended = () => {
+      // with loop=true this never fires; kept as a safety net
       this.playing = false;
       this.onTick?.(this.duration);
       this.onEnded?.();
