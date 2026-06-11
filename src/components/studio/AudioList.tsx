@@ -7,11 +7,11 @@ import React from "react";
 import { View, Text, Image, Pressable, StyleSheet, type StyleProp, type ViewStyle } from "react-native";
 import Animated, {
   useSharedValue, useAnimatedStyle, useAnimatedReaction,
-  withSpring, withTiming, withSequence, runOnJS, Easing,
+  withSpring, withTiming, withSequence, runOnJS,
   LinearTransition, type SharedValue,
 } from "react-native-reanimated";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import Svg, { Rect, Defs, LinearGradient, Stop } from "react-native-svg";
+import Svg, { Rect } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import {
@@ -236,24 +236,6 @@ function RowInner({
   }, [glass, surface]);
   const surfaceStyle = useAnimatedStyle(() => ({ opacity: surface.value }));
 
-  // Selection light sweep (WAV-25): the inset corner glints can't be rotated
-  // around the stroke (they're box-shadows), so on becoming the playing row a
-  // soft light band sweeps across the card once. Parked off-row when idle —
-  // the container's overflow:hidden clips it.
-  const sweep = useSharedValue(1);
-  React.useEffect(() => {
-    if (playing) {
-      sweep.value = 0;
-      sweep.value = withTiming(1, { duration: 650, easing: Easing.out(Easing.quad) });
-    }
-  }, [playing, sweep]);
-  const sweepStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: -SWEEP_W * 1.5 + sweep.value * (SWEEP_TRAVEL + SWEEP_W * 1.5) },
-      { rotate: "18deg" },
-    ],
-  }));
-
   return (
     <PressableScale
       style={styles.rowInner}
@@ -279,27 +261,9 @@ function RowInner({
           <GlassEdge radius={34} />
         </PressableScale>
       </Animated.View>
-      <Animated.View pointerEvents="none" style={[styles.sweep, sweepStyle]}>
-        <Svg width={SWEEP_W} height={SWEEP_H} viewBox={`0 0 ${SWEEP_W} ${SWEEP_H}`}>
-          <Defs>
-            <LinearGradient id="rowSweep" x1="0" y1="0" x2="1" y2="0">
-              <Stop offset="0" stopColor="#FFFFFF" stopOpacity="0" />
-              <Stop offset="0.5" stopColor="#FFFFFF" stopOpacity="0.28" />
-              <Stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
-            </LinearGradient>
-          </Defs>
-          <Rect x={0} y={0} width={SWEEP_W} height={SWEEP_H} fill="url(#rowSweep)" />
-        </Svg>
-      </Animated.View>
     </PressableScale>
   );
 }
-
-// Light-sweep geometry: a 90px band, taller than the row so the 18° tilt still
-// covers it, travelling the full card width.
-const SWEEP_W = 90;
-const SWEEP_H = 140;
-const SWEEP_TRAVEL = 420;
 
 export function ListRowUnselected(p: RowProps) {
   return (
@@ -510,7 +474,6 @@ const styles = StyleSheet.create({
     gap: 5, padding: 10, borderRadius: 16, overflow: "hidden",
   },
   rowGlass: { borderRadius: 16, ...panelSurface },
-  sweep: { position: "absolute", left: 0, top: -(SWEEP_H - 60) / 2, width: SWEEP_W, height: SWEEP_H },
   // Solid backing so the cover always reads 100% opaque, even over glass or
   // when a video frame carries an alpha channel (WAV-25).
   albumArt: { width: 40, height: 40, borderRadius: 8, backgroundColor: "#101010", opacity: 1 },
