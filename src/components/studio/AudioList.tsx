@@ -38,24 +38,31 @@ function CoverArt({ uri }: { uri?: string | null }) {
   );
 }
 
-// Real per-row visualizer (WAV-17). Static loudness sparkline from PCM peaks at
-// 65% opacity when idle (emphasizes it isn't playing); when the row is playing
-// the bars move live with the audio via the engine's analyser, at full opacity.
-// Element sources (video files) have no analyser tap — they keep the static
-// bars and skip the rAF loop entirely (WAV-22 perf).
+// Real per-row visualizer (WAV-17 / WAV-25). Static loudness sparkline from
+// PCM peaks at 65% opacity when idle (emphasizes it isn't playing); while the
+// row is playing the bars ALWAYS move at full opacity — live from the engine's
+// analyser when it has a tap (buffer sources), otherwise a synthetic groove
+// (element/video sources play outside the Web Audio graph, WAV-22).
 const MINI_N = 9;
 function MiniWave({ peaks, playing }: { peaks?: number[]; playing?: boolean }) {
   const [live, setLive] = React.useState<number[] | null>(null);
   React.useEffect(() => {
-    if (!playing || !player.hasLiveLevels) {
+    if (!playing) {
       setLive(null);
       return;
     }
+    // Per-bar oscillation with mismatched frequencies/phases — reads as music
+    // even though no analyser data exists for element sources.
+    const synth = () => {
+      const t = performance.now() / 1000;
+      return Array.from({ length: MINI_N }, (_, i) =>
+        0.3 + 0.7 * Math.abs(Math.sin(t * (2.1 + (i % 4) * 0.9) + i * 1.9)));
+    };
     let raf = 0;
     let frame = 0;
     const loop = () => {
       // every 3rd frame (~20fps) — indistinguishable on a 20px meter, third the work
-      if (++frame % 3 === 0) setLive(player.levels(MINI_N));
+      if (++frame % 3 === 0) setLive(player.hasLiveLevels ? player.levels(MINI_N) : synth());
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -221,15 +228,26 @@ function RowInner({
     return { opacity: 1 - e, maxWidth: 120 * (1 - e) };
   });
 
+  // The liquid-glass surface fades in/out (WAV-25) instead of snapping — the
+  // fill, blur and corner highlights all ride one opacity.
+  const surface = useSharedValue(glass ? 1 : 0);
+  React.useEffect(() => {
+    surface.value = withTiming(glass ? 1 : 0, { duration: 240 });
+  }, [glass, surface]);
+  const surfaceStyle = useAnimatedStyle(() => ({ opacity: surface.value }));
+
   return (
     <PressableScale
-      style={[styles.rowInner, glass && styles.rowInnerCard]}
+      style={styles.rowInner}
       scaleTo={0.98}
       dim={0.05}
       onPress={onPlay}
       onHoverIn={onHoverIn}
       onHoverOut={onHoverOut}
     >
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.rowGlass, surfaceStyle]}>
+        <GlassEdge radius={16} />
+      </Animated.View>
       <CoverArt uri={cover} />
       <Animated.View style={waveCollapse}>
         <MiniWave peaks={peaks} playing={playing} />
@@ -243,7 +261,6 @@ function RowInner({
           <GlassEdge radius={34} />
         </PressableScale>
       </Animated.View>
-      {glass && <GlassEdge radius={16} />}
     </PressableScale>
   );
 }
@@ -345,7 +362,11 @@ export function ListRow({
             }}
             style={styles.favoriteCircle}
           >
-            <HeartIcon size={20} />
+            {/* White @80% = not favorited; the heart takes its full red only
+                once the sound IS a favorite (WAV-25). */}
+            <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
+              <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
+            </View>
             <GlassEdge radius={34} />
           </PressableScale>
           <PressableScale onPress={onDelete} style={styles.deleteBtn}>
@@ -452,8 +473,10 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     gap: 5, padding: 10, borderRadius: 16, overflow: "hidden",
   },
-  rowInnerCard: { ...panelSurface },
-  albumArt: { width: 40, height: 40, borderRadius: 8 },
+  rowGlass: { borderRadius: 16, ...panelSurface },
+  // Solid backing so the cover always reads 100% opaque, even over glass or
+  // when a video frame carries an alpha channel (WAV-25).
+  albumArt: { width: 40, height: 40, borderRadius: 8, backgroundColor: "#101010", opacity: 1 },
   coverGlyph: { alignItems: "center", justifyContent: "center", backgroundColor: COLORS.white10 },
   rowTitle: { flex: 1, minWidth: 0, fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "left" },
   rowTail: {

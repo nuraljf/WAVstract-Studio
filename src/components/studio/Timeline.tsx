@@ -1,18 +1,21 @@
 import React from "react";
 import {
-  View, Text, Pressable, StyleSheet,
-  type GestureResponderEvent, type StyleProp, type ViewStyle,
+  View, Text, StyleSheet,
+  type StyleProp, type ViewStyle,
 } from "react-native";
 import Animated, {
-  useDerivedValue, useAnimatedStyle, type SharedValue,
+  useDerivedValue, useAnimatedStyle, useSharedValue,
+  withDelay, withSpring, withTiming, runOnJS, type SharedValue,
 } from "react-native-reanimated";
-import Svg, { Path, G, Rect } from "react-native-svg";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Svg, { Path, G } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import { MorphPlayPause } from "./MorphPlayPause";
 import { PopText } from "./PopText";
 import { DownloadIcon } from "./icons";
 import { COLORS, FONT, panelSurface, accentSurface } from "./theme";
+import { SPRING } from "./motion";
 import { fmtTime } from "../../lib/use-studio";
 import svgPaths from "./svgPaths";
 
@@ -51,26 +54,70 @@ function PlaceholderWave() {
   );
 }
 
-// Real waveform from decoded PCM peaks, in a single colour. Progress is shown
-// by overlaying an accent copy clipped to the played fraction (see below) —
-// the SVG itself never re-renders while playing (WAV-22 perf).
+// Construct / deconstruct (WAV-26): each bar pops up from the centerline with
+// a left-to-right stagger, so a new wave "builds" instead of appearing; the
+// outgoing wave collapses the same way underneath it. Custom worklets keep the
+// motion in the shared spring language (same factory pattern as the list rows).
+function barEntering(i: number) {
+  return () => {
+    "worklet";
+    return {
+      initialValues: { opacity: 0, transform: [{ scaleY: 0.08 }] },
+      animations: {
+        opacity: withDelay(i * 5, withTiming(1, { duration: 80 })),
+        transform: [{ scaleY: withDelay(i * 5, withSpring(1, SPRING.bouncy)) }],
+      },
+    };
+  };
+}
+function barExiting(i: number) {
+  return () => {
+    "worklet";
+    return {
+      initialValues: { opacity: 1, transform: [{ scaleY: 1 }] },
+      animations: {
+        opacity: withDelay(i * 2, withTiming(0, { duration: 110 })),
+        transform: [{ scaleY: withDelay(i * 2, withTiming(0.08, { duration: 110 })) }],
+      },
+    };
+  };
+}
+
+// Real waveform from decoded PCM peaks, in a single colour. Bars are plain
+// absolutely-positioned views (one-shot animated, then static); progress is
+// shown by overlaying an accent copy clipped to the played fraction (see
+// below) — nothing here re-renders while playing (WAV-22 perf).
 function PeaksWave({ peaks, color }: { peaks: number[]; color: string }) {
   const n = peaks.length;
   const slot = WAVE_W / n;
   const barW = Math.max(1.5, slot * 0.55);
   return (
-    <Svg width={WAVE_W} height={WAVE_H} viewBox={`0 0 ${WAVE_W} ${WAVE_H}`} fill="none">
+    <View style={styles.waveBox} pointerEvents="none">
       {peaks.map((p, i) => {
         const h = Math.max(2, p * WAVE_H);
-        const x = i * slot + (slot - barW) / 2;
-        const y = (WAVE_H - h) / 2;
-        return <Rect key={i} x={x} y={y} width={barW} height={h} rx={barW / 2} fill={color} />;
+        return (
+          <Animated.View
+            key={i}
+            entering={barEntering(i) as any}
+            exiting={barExiting(i) as any}
+            style={{
+              position: "absolute",
+              left: i * slot + (slot - barW) / 2,
+              top: (WAVE_H - h) / 2,
+              width: barW,
+              height: h,
+              borderRadius: barW / 2,
+              backgroundColor: color,
+            }}
+          />
+        );
       })}
-    </Svg>
+    </View>
   );
 }
 
 export type TimelineProps = {
+  soundId?: string | null; // identity of the shown sound — a change replays the wave build
   peaks?: number[];
   position?: number;   // seconds (React state, ~1 Hz — drives the mm:ss text)
   positionSV?: SharedValue<number>; // seconds, per-frame — drives playhead/fill
@@ -82,7 +129,13 @@ export type TimelineProps = {
   style?: StyleProp<ViewStyle>;
 };
 
+function clamp01(v: number): number {
+  "worklet";
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
 export default function Timeline({
+  soundId,
   peaks,
   position = 0,
   positionSV,
@@ -95,9 +148,45 @@ export default function Timeline({
 }: TimelineProps) {
   const hasSound = !!peaks && peaks.length > 0 && duration > 0;
 
-  // Played fraction on the UI thread: prefer the live shared value, fall back
-  // to the (slow) position prop when this timeline isn't the active player.
+  // Scrubbing (WAV-26): holding down anywhere on the wave grabs the playhead —
+  // it follows the finger while held, and the audio starts from wherever it's
+  // released. A plain tap is the degenerate case (grab + release in place).
+  const scrubbing = useSharedValue(0);
+  const scrubX = useSharedValue(0);
+  const seekTo = React.useCallback(
+    (f: number) => onSeek?.(f * duration),
+    [onSeek, duration],
+  );
+  const scrub = React.useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(hasSound && !!onSeek)
+        .minDistance(0)
+        .maxPointers(1)
+        .onBegin((e) => {
+          scrubbing.value = 1;
+          scrubX.value = clamp01(e.x / WAVE_W);
+        })
+        .onUpdate((e) => {
+          scrubX.value = clamp01(e.x / WAVE_W);
+        })
+        .onEnd(() => {
+          // park the live head on the chosen spot BEFORE the JS seek lands, so
+          // the playhead doesn't flash back to the old position for a frame
+          if (positionSV) positionSV.value = scrubX.value * duration;
+          runOnJS(seekTo)(scrubX.value);
+        })
+        .onFinalize(() => {
+          scrubbing.value = 0;
+        }),
+    [hasSound, onSeek, duration, seekTo, scrubbing, scrubX, positionSV],
+  );
+
+  // Played fraction on the UI thread: the finger wins while scrubbing, then
+  // the live shared value, then the (slow) position prop when this timeline
+  // isn't the active player.
   const fraction = useDerivedValue(() => {
+    if (scrubbing.value > 0) return scrubX.value;
     const pos = positionSV ? positionSV.value : position;
     const f = duration > 0 ? pos / duration : 0;
     return f < 0 ? 0 : f > 1 ? 1 : f;
@@ -120,37 +209,35 @@ export default function Timeline({
     hasSound ? fmtTime((duration * i) / 6) : "0:00",
   );
 
-  const handleSeek = (e: GestureResponderEvent) => {
-    if (!hasSound || !onSeek) return;
-    // react-native-web doesn't always populate locationX — fall back to the
-    // DOM offsetX, and bail if neither is a finite number (avoids a NaN seek).
-    const ne: any = e.nativeEvent;
-    const x = Number.isFinite(ne.locationX) ? ne.locationX : ne.offsetX;
-    if (!Number.isFinite(x)) return;
-    onSeek(Math.max(0, Math.min(1, x / WAVE_W)) * duration);
-  };
-
   return (
     <View style={[styles.card, style]}>
-      <Pressable style={styles.visualizer} onPress={handleSeek} disabled={!hasSound}>
-        {hasSound ? (
-          <>
-            <PeaksWave peaks={peaks!} color={COLORS.white} />
-            <Animated.View style={[styles.clip, clipStyle]} pointerEvents="none">
-              <Animated.View style={counterStyle}>
-                <PeaksWave peaks={peaks!} color={COLORS.accent} />
+      <GestureDetector gesture={scrub}>
+        <View style={styles.visualizer}>
+          {hasSound ? (
+            <>
+              {/* Keyed by sound identity: pointing the timeline at a new sound
+                  unmounts the old bars (stagger-collapse) while the new ones
+                  build over them (WAV-26). The playhead lives outside the key
+                  so it never re-animates. */}
+              <React.Fragment key={soundId ?? "wave"}>
+                <PeaksWave peaks={peaks!} color={COLORS.white} />
+                <Animated.View style={[styles.clip, clipStyle]} pointerEvents="none">
+                  <Animated.View style={counterStyle}>
+                    <PeaksWave peaks={peaks!} color={COLORS.accent} />
+                  </Animated.View>
+                </Animated.View>
+              </React.Fragment>
+              <Animated.View pointerEvents="none" style={[styles.playheadWrap, playheadStyle]}>
+                <Svg width={2} height={52} viewBox="0 0 2 52" fill="none">
+                  <Path d="M1 51V1" stroke={COLORS.accent} strokeLinecap="round" strokeWidth={2} />
+                </Svg>
               </Animated.View>
-            </Animated.View>
-            <Animated.View pointerEvents="none" style={[styles.playheadWrap, playheadStyle]}>
-              <Svg width={2} height={52} viewBox="0 0 2 52" fill="none">
-                <Path d="M1 51V1" stroke={COLORS.accent} strokeLinecap="round" strokeWidth={2} />
-              </Svg>
-            </Animated.View>
-          </>
-        ) : (
-          <PlaceholderWave />
-        )}
-      </Pressable>
+            </>
+          ) : (
+            <PlaceholderWave />
+          )}
+        </View>
+      </GestureDetector>
 
       <View style={styles.timeStrip}>
         {ticks.map((t, i) => (
@@ -192,6 +279,7 @@ const styles = StyleSheet.create({
     ...panelSurface,
   },
   visualizer: { width: WAVE_W, height: WAVE_H, overflow: "hidden", justifyContent: "center" },
+  waveBox: { width: WAVE_W, height: WAVE_H },
   clip: {
     position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
     overflow: "hidden", justifyContent: "center",
