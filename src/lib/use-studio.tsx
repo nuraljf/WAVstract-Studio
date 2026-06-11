@@ -1,17 +1,23 @@
-// Studio state (WAV-16 Phase 1). Holds the extracted sounds and drives the
-// single shared audio Player. Components read from here via useStudio().
+// Studio state (WAV-16 Phase 1, WAV-27 cloud library). Holds the extracted
+// sounds and drives the single shared audio Player. Components read from here
+// via useStudio().
 //
 // Model:
-//   - sounds[]    : every extracted clip (peaks + cover + decoded buffer)
-//   - activeId    : whose buffer is currently loaded in the Player
+//   - sounds[]    : every clip in the table. `source` is null for cloud rows
+//                   whose audio hasn't been downloaded to this device yet.
+//   - sync        : per-row lifecycle — local (guest), uploading, synced,
+//                   failed (tap to retry), downloading (first play on device)
+//   - activeId    : whose audio is currently loaded in the Player
 //   - timelineId  : which sound the Timeline card shows (set by the row "+")
 //   - positionSV  : live playback head (seconds) as a Reanimated shared value —
 //                   updated every frame WITHOUT a React render (WAV-22 perf)
 //   - position    : the same head as React state, updated only when the
 //                   displayed second changes (drives the mm:ss text at ~1 Hz)
 //
-// Because the list preview and the timeline share one Player, pressing "+" on a
-// playing row just points the timeline at it — no reload, no audio cut.
+// Cloud flow (signed in): extract → row appears instantly (uploading) → file
+// uploads to the private bucket + metadata row inserts → synced. On any other
+// device the metadata list loads instantly; audio bytes download lazily on the
+// first play. Favorite/delete mirror to the cloud. Guests stay fully local.
 
 import React, {
   createContext,
@@ -29,8 +35,13 @@ import {
   extractCover,
   isAudioSupported,
   player,
+  sourceFromBlob,
   type PlayableSource,
 } from "./audio-engine";
+import { useAuth } from "./use-auth";
+import * as cloud from "./cloud";
+
+export type SyncState = "local" | "uploading" | "synced" | "failed" | "downloading";
 
 export type Sound = {
   id: string;
@@ -39,7 +50,12 @@ export type Sound = {
   duration: number;
   cover: string | null; // data URL (video first frame) or null → music glyph
   favorite: boolean; // heart action in the row's editing state (WAV-24)
-  source: PlayableSource; // decoded PCM buffer, or a media-element fallback
+  source: PlayableSource | null; // null = cloud row not downloaded yet
+  sync: SyncState;
+  cloudId?: string; // db row uuid once synced
+  filePath?: string; // storage object path once synced
+  mime?: string | null;
+  file?: File; // kept while uploading/failed so retry can re-send
 };
 
 const DEFAULT_SPEED = 1.0;
@@ -53,6 +69,7 @@ type StudioState = {
   positionSV: SharedValue<number>;
   speed: number;
   supported: boolean;
+  cloudLoading: boolean; // first library fetch after sign-in
   timelineSound: Sound | null;
   activeSound: Sound | null;
   extract: () => void;
@@ -60,6 +77,7 @@ type StudioState = {
   addToTimeline: (id: string) => void;
   removeSound: (id: string) => void;
   toggleFavorite: (id: string) => void;
+  retryUpload: (id: string) => void;
   seek: (t: number) => void;
   setSpeed: (v: number) => void;
 };
@@ -80,18 +98,28 @@ function baseName(filename: string): string {
 let fileInput: HTMLInputElement | null = null;
 
 export function StudioProvider({ children }: { children: React.ReactNode }) {
+  const { session } = useAuth();
+  const userId = session?.user.id ?? null;
+
   const [sounds, setSounds] = useState<Sound[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [timelineId, setTimelineId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [speed, setSpeedState] = useState(DEFAULT_SPEED);
+  const [cloudLoading, setCloudLoading] = useState(false);
 
   const positionSV = useSharedValue(0);
   const rafRef = useRef<number | null>(null);
   const lastSecRef = useRef(-1);
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+  const userIdRef = useRef<string | null>(null);
+  userIdRef.current = userId;
+
+  const patchSound = useCallback((id: string, patch: Partial<Sound>) => {
+    setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }, []);
 
   // Push a position into BOTH the shared value (smooth visuals) and React
   // state (text). Used for discrete jumps: seek / pause / end / track switch.
@@ -105,8 +133,6 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   );
 
   // ---- rAF position ticker (runs only while playing) ----
-  // Per frame it only writes the shared value (no render). React state is
-  // touched once per second, when the visible mm:ss actually changes.
   const stopTicker = useCallback(() => {
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
@@ -128,6 +154,14 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     };
     rafRef.current = requestAnimationFrame(tick);
   }, [stopTicker, positionSV]);
+
+  const resetPlayback = useCallback(() => {
+    player.unload();
+    setActiveId(null);
+    setIsPlaying(false);
+    syncPosition(0);
+    stopTicker();
+  }, [stopTicker, syncPosition]);
 
   useEffect(() => {
     // natural end → reset to stopped at 0
@@ -155,6 +189,87 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     };
   }, [stopTicker, syncPosition]);
 
+  // ---- cloud library: load on sign-in, clear on sign-out ----
+  useEffect(() => {
+    if (!userId) {
+      // Signed out (or guest): the account library leaves with the account.
+      setSounds((prev) => {
+        prev.forEach((s) => {
+          if (s.source?.kind === "element") URL.revokeObjectURL(s.source.url);
+        });
+        return [];
+      });
+      setTimelineId(null);
+      resetPlayback();
+      return;
+    }
+    let cancelled = false;
+    setCloudLoading(true);
+    cloud
+      .listSounds()
+      .then((rows) => {
+        if (cancelled) return;
+        setSounds((prev) => {
+          const known = new Set(prev.map((s) => s.cloudId).filter(Boolean));
+          const fetched: Sound[] = rows
+            .filter((r) => !known.has(r.id))
+            .map((r) => ({
+              id: `cloud_${r.id}`,
+              name: r.name,
+              peaks: Array.isArray(r.peaks) ? (r.peaks as number[]) : [],
+              duration: r.duration,
+              cover: r.cover,
+              favorite: r.favorite,
+              source: null, // bytes download lazily on first play
+              sync: "synced",
+              cloudId: r.id,
+              filePath: r.file_path,
+              mime: r.mime,
+            }));
+          return [...prev, ...fetched];
+        });
+      })
+      .catch((err) => console.error("[studio] cloud list failed", err))
+      .finally(() => !cancelled && setCloudLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, resetPlayback]);
+
+  // ---- background upload (signed-in extracts + retries) ----
+  const uploadInBackground = useCallback(
+    (id: string, snd: Pick<Sound, "name" | "duration" | "peaks" | "cover" | "favorite">, file: File) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      patchSound(id, { sync: "uploading" });
+      cloud
+        .uploadSound({
+          userId: uid,
+          file,
+          mime: file.type || "application/octet-stream",
+          name: snd.name,
+          duration: snd.duration,
+          peaks: snd.peaks,
+          cover: snd.cover,
+          favorite: snd.favorite,
+        })
+        .then((row) => {
+          patchSound(id, {
+            sync: "synced",
+            cloudId: row.id,
+            filePath: row.file_path,
+            mime: row.mime,
+            file: undefined,
+          });
+        })
+        .catch((err) => {
+          console.error("[studio] upload failed", err);
+          patchSound(id, { sync: "failed" });
+        });
+    },
+    [patchSound],
+  );
+
   // ---- actions ----
   const extract = useCallback(() => {
     if (!isAudioSupported || typeof document === "undefined") return;
@@ -177,6 +292,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         // must never block the upload from appearing (WAV-16 follow-up).
         const id = nextId();
         const { source, duration, peaks } = await extractAudio(file);
+        const signedIn = !!userIdRef.current;
         const sound: Sound = {
           id,
           name: baseName(file.name),
@@ -185,6 +301,9 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
           cover: null,
           favorite: false,
           source,
+          sync: signedIn ? "uploading" : "local",
+          mime: file.type || null,
+          file: signedIn ? file : undefined,
         };
         // WAV-17: extraction only adds the row in its UNSELECTED state — it
         // does not start playing. Playback begins when the user presses the row.
@@ -196,6 +315,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
             setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, cover } : s)));
           })
           .catch(() => {});
+
+        if (signedIn) {
+          // Cover may not be ready yet — upload metadata with what we have;
+          // the row cover is local-first anyway. (Cover lands next upload.)
+          uploadInBackground(id, sound, file);
+        }
       } catch (err) {
         console.error("[studio] decode failed", err);
       } finally {
@@ -204,28 +329,80 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     };
     document.body.appendChild(input);
     input.click();
-  }, []);
+  }, [uploadInBackground]);
+
+  const retryUpload = useCallback(
+    (id: string) => {
+      setSounds((prev) => {
+        const snd = prev.find((s) => s.id === id);
+        if (snd?.file && snd.sync === "failed") {
+          uploadInBackground(id, snd, snd.file);
+        }
+        return prev;
+      });
+    },
+    [uploadInBackground],
+  );
+
+  const playLoaded = useCallback(
+    (id: string, source: PlayableSource) => {
+      player.setRate(player.speed);
+      player.load(source);
+      player.play(0);
+      setActiveId(id);
+      syncPosition(0);
+      setIsPlaying(true);
+      startTicker();
+    },
+    [startTicker, syncPosition],
+  );
 
   const togglePlay = useCallback(
     (id: string) => {
       const sound = sounds.find((s) => s.id === id);
       if (!sound) return;
-      if (activeId === id) {
+      if (activeId === id && sound.source) {
         player.toggle();
         if (!player.isPlaying) syncPosition(player.currentTime);
-      } else {
+        const nowPlaying = player.isPlaying;
+        setIsPlaying(nowPlaying);
+        if (nowPlaying) startTicker();
+        else stopTicker();
+        return;
+      }
+      if (sound.source) {
         player.setRate(speed);
         player.load(sound.source);
         player.play(0);
         setActiveId(id);
         syncPosition(0);
+        setIsPlaying(player.isPlaying);
+        if (player.isPlaying) startTicker();
+        return;
       }
-      const nowPlaying = player.isPlaying;
-      setIsPlaying(nowPlaying);
-      if (nowPlaying) startTicker();
-      else stopTicker();
+      // Cloud row, first play on this device: download → decode → play.
+      if (!sound.filePath || sound.sync === "downloading") return;
+      patchSound(id, { sync: "downloading" });
+      cloud
+        .downloadSound(sound.filePath, sound.mime ?? null)
+        .then((blob) => sourceFromBlob(blob, sound.mime ?? null, sound.duration))
+        .then(({ source, duration, peaks }) => {
+          patchSound(id, {
+            source,
+            sync: "synced",
+            duration: duration > 0 ? duration : sound.duration,
+            // PCM decode yields REAL peaks — upgrade the stored sparkline
+            ...(peaks ? { peaks } : null),
+          });
+          player.setRate(player.speed);
+          playLoaded(id, source);
+        })
+        .catch((err) => {
+          console.error("[studio] download failed", err);
+          patchSound(id, { sync: "synced" }); // row stays usable; tap to retry
+        });
     },
-    [sounds, activeId, speed, startTicker, stopTicker, syncPosition],
+    [sounds, activeId, speed, startTicker, stopTicker, syncPosition, patchSound, playLoaded],
   );
 
   const addToTimeline = useCallback((id: string) => {
@@ -240,23 +417,35 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         const snd = prev.find((s) => s.id === id);
         // element sources keep the picked file alive via an object URL — this
         // row is gone for good, so release it.
-        if (snd?.source.kind === "element") URL.revokeObjectURL(snd.source.url);
+        if (snd?.source?.kind === "element") URL.revokeObjectURL(snd.source.url);
+        if (snd?.cloudId && snd.filePath) {
+          cloud.deleteSound(snd.cloudId, snd.filePath).catch((err) =>
+            console.error("[studio] cloud delete failed", err),
+          );
+        }
         return prev.filter((s) => s.id !== id);
       });
       setTimelineId((t) => (t === id ? null : t));
       if (activeIdRef.current === id) {
-        player.unload();
-        setActiveId(null);
-        setIsPlaying(false);
-        syncPosition(0);
-        stopTicker();
+        resetPlayback();
       }
     },
-    [stopTicker, syncPosition],
+    [resetPlayback],
   );
 
   const toggleFavorite = useCallback((id: string) => {
-    setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, favorite: !s.favorite } : s)));
+    setSounds((prev) =>
+      prev.map((s) => {
+        if (s.id !== id) return s;
+        const favorite = !s.favorite;
+        if (s.cloudId) {
+          cloud.setFavorite(s.cloudId, favorite).catch((err) =>
+            console.error("[studio] favorite sync failed", err),
+          );
+        }
+        return { ...s, favorite };
+      }),
+    );
   }, []);
 
   const seek = useCallback(
@@ -291,6 +480,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       positionSV,
       speed,
       supported: isAudioSupported,
+      cloudLoading,
       timelineSound,
       activeSound,
       extract,
@@ -298,13 +488,14 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       addToTimeline,
       removeSound,
       toggleFavorite,
+      retryUpload,
       seek,
       setSpeed,
     }),
     [
       sounds, activeId, timelineId, isPlaying, position, positionSV, speed,
-      timelineSound, activeSound, extract, togglePlay, addToTimeline,
-      removeSound, toggleFavorite, seek, setSpeed,
+      cloudLoading, timelineSound, activeSound, extract, togglePlay,
+      addToTimeline, removeSound, toggleFavorite, retryUpload, seek, setSpeed,
     ],
   );
 
@@ -317,12 +508,20 @@ export function useStudio(): StudioState {
   return ctx;
 }
 
-/** mm:ss formatter for the timeline labels. */
+/** m:ss formatter (timeline tick labels). */
 export function fmtTime(seconds: number): string {
   if (!isFinite(seconds) || seconds < 0) seconds = 0;
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** mm:ss formatter (elapsed / total readout, per the new studio design). */
+export function fmtTimePad(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
 // Keep the Platform import meaningful for native (no-op extract path above).

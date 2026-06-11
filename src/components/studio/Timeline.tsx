@@ -16,7 +16,7 @@ import { PopText } from "./PopText";
 import { DownloadIcon } from "./icons";
 import { COLORS, FONT, panelSurface, accentSurface } from "./theme";
 import { SPRING } from "./motion";
-import { fmtTime } from "../../lib/use-studio";
+import { fmtTime, fmtTimePad } from "../../lib/use-studio";
 import svgPaths from "./svgPaths";
 
 const WAVE_W = 323;
@@ -252,8 +252,8 @@ export default function Timeline({
         </PressableScale>
 
         <View style={styles.timeRow}>
-          <PopText style={styles.elapsed}>{fmtTime(position)}</PopText>
-          <Text style={styles.total}> / {fmtTime(duration)}</Text>
+          <PopText style={styles.elapsed}>{fmtTimePad(position)}</PopText>
+          <Text style={styles.total}> / {fmtTimePad(duration)}</Text>
         </View>
 
         <View style={styles.saveSlot}>

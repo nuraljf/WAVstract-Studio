@@ -13,6 +13,7 @@ export const COLORS = {
 };
 
 export const FONT = {
+  geistLight: "Geist_300Light",
   geistRegular: "Geist_400Regular",
   geistMedium: "Geist_500Medium",
   geistSemibold: "Geist_600SemiBold",

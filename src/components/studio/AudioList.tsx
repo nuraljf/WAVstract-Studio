@@ -23,7 +23,9 @@ import {
   panelSurface, accentSurface, dangerSurface,
 } from "./theme";
 import { SPRING } from "./motion";
+import { LoadingBars, ShimmerText } from "./LoadingBars";
 import { player } from "../../lib/audio-engine";
+import type { SyncState } from "../../lib/use-studio";
 
 const ALBUM_ART = require("./assets/album-art.png");
 
@@ -187,8 +189,10 @@ type RowProps = {
   cover?: string | null;
   peaks?: number[];
   favorite?: boolean;
+  sync?: SyncState; // uploading/downloading → busy meter; failed → red retry row
   onPlay?: () => void;
   onAdd?: () => void;
+  onRetry?: () => void;
   style?: StyleProp<ViewStyle>;
 };
 
@@ -198,8 +202,10 @@ function RowInner({
   cover,
   peaks,
   favorite = false,
+  sync = "local",
   onPlay,
   onAdd,
+  onRetry,
   glass = false,
   playing = false,
   editing = false,
@@ -214,6 +220,7 @@ function RowInner({
   onHoverIn?: () => void;
   onHoverOut?: () => void;
 }) {
+  const busy = sync === "uploading" || sync === "downloading";
   // Editing base shows only cover + title (Figma 199:253) — the wave and the
   // duration/+ tail fade AND collapse as the swipe progresses, so the title
   // keeps the room the actions take away.
@@ -241,26 +248,45 @@ function RowInner({
       style={styles.rowInner}
       scaleTo={0.98}
       dim={0.05}
-      onPress={onPlay}
+      onPress={sync === "failed" ? onRetry : onPlay}
+      disabled={busy}
       onHoverIn={onHoverIn}
       onHoverOut={onHoverOut}
     >
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.rowGlass, surfaceStyle]}>
         <GlassEdge radius={16} />
       </Animated.View>
-      <CoverArt uri={cover} />
-      <Animated.View style={waveCollapse}>
-        <MiniWave peaks={peaks} playing={playing} />
-      </Animated.View>
-      <Text style={styles.rowTitle} numberOfLines={1} ellipsizeMode="tail">{title}</Text>
-      <Animated.View style={[styles.rowTail, tailCollapse]} pointerEvents={editing ? "none" : "auto"}>
-        {favorite && <HeartIcon size={12} />}
-        <Text style={styles.rowDuration}>{duration}</Text>
-        <PressableScale onPress={onAdd} style={styles.addBtn}>
-          <PlusIcon size={20} />
-          <GlassEdge radius={34} />
-        </PressableScale>
-      </Animated.View>
+      {busy ? (
+        // Uploading / first-device download (Figma 244:3632): live bars meter +
+        // gradient-sweeping label. Same 60px row so the list doesn't jump.
+        <View style={styles.statusInner}>
+          <LoadingBars size={24} />
+          <ShimmerText style={styles.statusText}>
+            {sync === "uploading" ? "Uploading" : "Loading"}
+          </ShimmerText>
+        </View>
+      ) : sync === "failed" ? (
+        // Upload failed (Figma 244:3716) — tapping the row retries.
+        <View style={styles.statusInner}>
+          <Text style={styles.failedText}>Failed to upload, try again.</Text>
+        </View>
+      ) : (
+        <>
+          <CoverArt uri={cover} />
+          <Animated.View style={waveCollapse}>
+            <MiniWave peaks={peaks} playing={playing} />
+          </Animated.View>
+          <Text style={styles.rowTitle} numberOfLines={1} ellipsizeMode="tail">{title}</Text>
+          <Animated.View style={[styles.rowTail, tailCollapse]} pointerEvents={editing ? "none" : "auto"}>
+            {favorite && <HeartIcon size={12} />}
+            <Text style={styles.rowDuration}>{duration}</Text>
+            <PressableScale onPress={onAdd} style={styles.addBtn}>
+              <PlusIcon size={20} />
+              <GlassEdge radius={34} />
+            </PressableScale>
+          </Animated.View>
+        </>
+      )}
     </PressableScale>
   );
 }
@@ -304,6 +330,7 @@ export function ListRow({
   const [editing, setEditing] = React.useState(false);
   const open = useSharedValue(0); // 0 closed … 1 actions revealed (>1 = rubber)
   const start = useSharedValue(0);
+  const busy = p.sync === "uploading" || p.sync === "downloading";
 
   useAnimatedReaction(
     () => open.value > 0.03,
@@ -317,10 +344,14 @@ export function ListRow({
   }, [open]);
 
   // Horizontal-only pan: a vertical move fails the gesture so the list still
-  // scrolls; a sub-threshold move stays a tap (play / close).
+  // scrolls; a sub-threshold move stays a tap (play / close). The settle runs
+  // in BOTH onEnd and onFinalize — a cancelled gesture (scroll steal, lost
+  // pointer on iOS) skips onEnd, which is what left rows stranded mid-swipe.
   const pan = Gesture.Pan()
+    .enabled(!busy)
     .activeOffsetX([-16, 16])
     .failOffsetY([-12, 12])
+    .shouldCancelWhenOutside(false)
     .onStart(() => {
       start.value = open.value;
     })
@@ -331,19 +362,30 @@ export function ListRow({
     .onEnd((e) => {
       const opening = e.velocityX < -300 || (open.value > 0.5 && e.velocityX < 300);
       open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
+    })
+    .onFinalize((_e, success) => {
+      if (!success) {
+        // gesture cancelled before onEnd — always finish to a resting state
+        open.value = withSpring(open.value > 0.5 ? 1 : 0, SPRING.snappy);
+      }
     });
 
   const baseStyle = useAnimatedStyle(() => ({
     marginRight: Math.min(open.value, 1.12) * REVEAL,
   }));
-  // Actions slide in from the right, fading + scaling up — the same reveal
-  // language as the slider tooltip and the row entrance.
+  // Liquid-glass reveal (no fades): the actions live UNDER the base card and
+  // slide out of its trailing edge as it gives way — the clip window below
+  // hides whatever is still "inside" the card, so they appear to morph out of
+  // it, like swiping an iOS notification.
   const actionsStyle = useAnimatedStyle(() => {
     const e = Math.min(open.value, 1);
-    return {
-      opacity: Math.min(1, e * 1.4),
-      transform: [{ translateX: (1 - e) * 28 }, { scale: 0.92 + e * 0.08 }],
-    };
+    return { transform: [{ translateX: -(1 - e) * REVEAL }] };
+  });
+  // The heart starts FUSED to the delete pill (gap closed) and breaks off once
+  // the swipe commits — the "disconnect" moment of the liquid glass look.
+  const heartStyle = useAnimatedStyle(() => {
+    const split = Math.min(Math.max((open.value - 0.55) / 0.45, 0), 1);
+    return { transform: [{ translateX: (1 - split) * AGAP }] };
   });
 
   return (
@@ -355,20 +397,22 @@ export function ListRow({
     >
       <View style={styles.actionsWrap} pointerEvents={editing ? "auto" : "none"}>
         <Animated.View style={[styles.actionsRow, actionsStyle]}>
-          <PressableScale
-            onPress={() => {
-              onFavorite?.();
-              close();
-            }}
-            style={styles.favoriteCircle}
-          >
-            {/* White @80% = not favorited; the heart takes its full red only
-                once the sound IS a favorite (WAV-25). */}
-            <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
-              <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
-            </View>
-            <GlassEdge radius={34} />
-          </PressableScale>
+          <Animated.View style={heartStyle}>
+            <PressableScale
+              onPress={() => {
+                onFavorite?.();
+                close();
+              }}
+              style={styles.favoriteCircle}
+            >
+              {/* White @80% = not favorited; the heart takes its full red only
+                  once the sound IS a favorite (WAV-25). */}
+              <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
+                <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
+              </View>
+              <GlassEdge radius={34} />
+            </PressableScale>
+          </Animated.View>
           <PressableScale onPress={onDelete} style={styles.deleteBtn}>
             <TrashIcon size={24} />
             <Text style={styles.deleteLabel}>Delete</Text>
@@ -392,6 +436,32 @@ export function ListRow({
         </Animated.View>
       </GestureDetector>
     </Animated.View>
+  );
+}
+
+// ------- Empty state (Figma 244:3715) -------
+// "Extract audio to get started" over a ghosted deck of three row cards.
+export function EmptyTable() {
+  return (
+    <View style={styles.emptyWrap}>
+      <Text style={styles.emptyTitle}>Extract audio to get started</Text>
+      <View style={styles.ghostGroup}>
+        <View style={[styles.ghostCard, { width: 297, top: 27 }]}>
+          <GlassEdge radius={16} />
+        </View>
+        <View style={[styles.ghostCard, { width: 322, top: 15 }]}>
+          <GlassEdge radius={16} />
+        </View>
+        <View style={[styles.ghostCard, styles.ghostFront]}>
+          <View style={styles.ghostIcon} />
+          <View style={styles.ghostDot} />
+          <View style={styles.ghostBar} />
+          <View style={{ flex: 1 }} />
+          <View style={styles.ghostPlay} />
+          <GlassEdge radius={16} />
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -490,14 +560,42 @@ const styles = StyleSheet.create({
     ...accentSurface,
   },
 
-  // swipe-revealed actions (pinned behind the base, right-aligned)
+  // swipe-revealed actions (pinned behind the base, right-aligned). The wrap
+  // clips, so the actions stay invisible while still "inside" the base card
+  // and slide out of its trailing edge as the swipe progresses (no fades).
   actionsWrap: {
     position: "absolute", right: 0, top: 0, bottom: 0,
     width: FAV_W + AGAP + DEL_W,
     alignItems: "center", justifyContent: "flex-end",
     flexDirection: "row",
+    overflow: "hidden",
   },
   actionsRow: { flexDirection: "row", alignItems: "center", gap: AGAP, height: "100%" },
+
+  // uploading / failed row states (Figma 244:3632 / 244:3716)
+  statusInner: {
+    height: 40, flex: 1,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
+  },
+  statusText: { fontFamily: FONT.geistMedium, fontSize: 16, textAlign: "center", color: COLORS.white },
+  failedText: { fontFamily: FONT.geistMedium, fontSize: 16, textAlign: "center", color: COLORS.danger },
+
+  // empty state (Figma 244:3715)
+  emptyWrap: { width: "100%", gap: 10, alignItems: "center" },
+  emptyTitle: { fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "center" },
+  ghostGroup: { width: "100%", height: 90, alignItems: "center" },
+  ghostCard: {
+    position: "absolute", height: 60, borderRadius: 16,
+    backgroundColor: "#000000", overflow: "hidden",
+  },
+  ghostFront: {
+    width: "100%", top: 0,
+    flexDirection: "row", alignItems: "center", gap: 5, padding: 10,
+  },
+  ghostIcon: { width: 40, height: 40, borderRadius: 8, backgroundColor: COLORS.white50 },
+  ghostDot: { width: 20, height: 20, borderRadius: 20, backgroundColor: COLORS.white50 },
+  ghostBar: { width: 89, height: 14, borderRadius: 20, backgroundColor: COLORS.white50 },
+  ghostPlay: { width: 35, height: 35, borderRadius: 20, backgroundColor: COLORS.white50 },
 
   // edit row — all three chips are 60px tall (favorite is 40, centered)
   editRow: { width: "100%", height: 60, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },

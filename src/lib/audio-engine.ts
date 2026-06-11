@@ -142,6 +142,34 @@ export async function extractAudio(file: File): Promise<Extracted> {
   };
 }
 
+/**
+ * Turn downloaded cloud bytes into something playable (WAV-27). Mirrors
+ * extractAudio but starts from a Blob + known MIME/duration from the library
+ * row. Returns real peaks when PCM decode succeeds (upgrades synthetic ones).
+ */
+export async function sourceFromBlob(
+  blob: Blob,
+  mime: string | null,
+  knownDuration: number,
+): Promise<{ source: PlayableSource; duration: number; peaks: number[] | null }> {
+  const isVideo = (mime ?? blob.type ?? "").startsWith("video");
+  if (!isVideo) {
+    try {
+      const buffer = await decodeAudioData(getCtx(), await blob.arrayBuffer());
+      return {
+        source: { kind: "buffer", buffer },
+        duration: buffer.duration,
+        peaks: computePeaks(buffer, 90),
+      };
+    } catch {
+      // fall through to the element path
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const duration = knownDuration > 0 ? knownDuration : await mediaDuration(url);
+  return { source: { kind: "element", url, duration }, duration, peaks: null };
+}
+
 // Placeholder waveform for element sources (no PCM to measure). A calm, fading
 // shape so the Timeline still renders a scrubbable track instead of a flat line;
 // live movement still comes from the analyser while it plays (WAV-17).
