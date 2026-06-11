@@ -33,6 +33,7 @@ export default function StudioScreen() {
           {/* Timeline + Speed slider group */}
           <View style={styles.timelineGroup}>
             <Timeline
+              soundId={timelineSound?.id}
               peaks={timelineSound?.peaks}
               position={timelineActive ? position : 0}
               positionSV={timelineActive ? positionSV : undefined}

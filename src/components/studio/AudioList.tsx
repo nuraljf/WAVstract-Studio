@@ -7,11 +7,11 @@ import React from "react";
 import { View, Text, Image, Pressable, StyleSheet, type StyleProp, type ViewStyle } from "react-native";
 import Animated, {
   useSharedValue, useAnimatedStyle, useAnimatedReaction,
-  withSpring, withTiming, withSequence, runOnJS,
+  withSpring, withTiming, withSequence, runOnJS, Easing,
   LinearTransition, type SharedValue,
 } from "react-native-reanimated";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import Svg, { Rect } from "react-native-svg";
+import Svg, { Rect, Defs, LinearGradient, Stop } from "react-native-svg";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import {
@@ -38,24 +38,31 @@ function CoverArt({ uri }: { uri?: string | null }) {
   );
 }
 
-// Real per-row visualizer (WAV-17). Static loudness sparkline from PCM peaks at
-// 65% opacity when idle (emphasizes it isn't playing); when the row is playing
-// the bars move live with the audio via the engine's analyser, at full opacity.
-// Element sources (video files) have no analyser tap — they keep the static
-// bars and skip the rAF loop entirely (WAV-22 perf).
+// Real per-row visualizer (WAV-17 / WAV-25). Static loudness sparkline from
+// PCM peaks at 65% opacity when idle (emphasizes it isn't playing); while the
+// row is playing the bars ALWAYS move at full opacity — live from the engine's
+// analyser when it has a tap (buffer sources), otherwise a synthetic groove
+// (element/video sources play outside the Web Audio graph, WAV-22).
 const MINI_N = 9;
 function MiniWave({ peaks, playing }: { peaks?: number[]; playing?: boolean }) {
   const [live, setLive] = React.useState<number[] | null>(null);
   React.useEffect(() => {
-    if (!playing || !player.hasLiveLevels) {
+    if (!playing) {
       setLive(null);
       return;
     }
+    // Per-bar oscillation with mismatched frequencies/phases — reads as music
+    // even though no analyser data exists for element sources.
+    const synth = () => {
+      const t = performance.now() / 1000;
+      return Array.from({ length: MINI_N }, (_, i) =>
+        0.3 + 0.7 * Math.abs(Math.sin(t * (2.1 + (i % 4) * 0.9) + i * 1.9)));
+    };
     let raf = 0;
     let frame = 0;
     const loop = () => {
       // every 3rd frame (~20fps) — indistinguishable on a 20px meter, third the work
-      if (++frame % 3 === 0) setLive(player.levels(MINI_N));
+      if (++frame % 3 === 0) setLive(player.hasLiveLevels ? player.levels(MINI_N) : synth());
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -221,15 +228,44 @@ function RowInner({
     return { opacity: 1 - e, maxWidth: 120 * (1 - e) };
   });
 
+  // The liquid-glass surface fades in/out (WAV-25) instead of snapping — the
+  // fill, blur and corner highlights all ride one opacity.
+  const surface = useSharedValue(glass ? 1 : 0);
+  React.useEffect(() => {
+    surface.value = withTiming(glass ? 1 : 0, { duration: 240 });
+  }, [glass, surface]);
+  const surfaceStyle = useAnimatedStyle(() => ({ opacity: surface.value }));
+
+  // Selection light sweep (WAV-25): the inset corner glints can't be rotated
+  // around the stroke (they're box-shadows), so on becoming the playing row a
+  // soft light band sweeps across the card once. Parked off-row when idle —
+  // the container's overflow:hidden clips it.
+  const sweep = useSharedValue(1);
+  React.useEffect(() => {
+    if (playing) {
+      sweep.value = 0;
+      sweep.value = withTiming(1, { duration: 650, easing: Easing.out(Easing.quad) });
+    }
+  }, [playing, sweep]);
+  const sweepStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: -SWEEP_W * 1.5 + sweep.value * (SWEEP_TRAVEL + SWEEP_W * 1.5) },
+      { rotate: "18deg" },
+    ],
+  }));
+
   return (
     <PressableScale
-      style={[styles.rowInner, glass && styles.rowInnerCard]}
+      style={styles.rowInner}
       scaleTo={0.98}
       dim={0.05}
       onPress={onPlay}
       onHoverIn={onHoverIn}
       onHoverOut={onHoverOut}
     >
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.rowGlass, surfaceStyle]}>
+        <GlassEdge radius={16} />
+      </Animated.View>
       <CoverArt uri={cover} />
       <Animated.View style={waveCollapse}>
         <MiniWave peaks={peaks} playing={playing} />
@@ -243,10 +279,27 @@ function RowInner({
           <GlassEdge radius={34} />
         </PressableScale>
       </Animated.View>
-      {glass && <GlassEdge radius={16} />}
+      <Animated.View pointerEvents="none" style={[styles.sweep, sweepStyle]}>
+        <Svg width={SWEEP_W} height={SWEEP_H} viewBox={`0 0 ${SWEEP_W} ${SWEEP_H}`}>
+          <Defs>
+            <LinearGradient id="rowSweep" x1="0" y1="0" x2="1" y2="0">
+              <Stop offset="0" stopColor="#FFFFFF" stopOpacity="0" />
+              <Stop offset="0.5" stopColor="#FFFFFF" stopOpacity="0.28" />
+              <Stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
+            </LinearGradient>
+          </Defs>
+          <Rect x={0} y={0} width={SWEEP_W} height={SWEEP_H} fill="url(#rowSweep)" />
+        </Svg>
+      </Animated.View>
     </PressableScale>
   );
 }
+
+// Light-sweep geometry: a 90px band, taller than the row so the 18° tilt still
+// covers it, travelling the full card width.
+const SWEEP_W = 90;
+const SWEEP_H = 140;
+const SWEEP_TRAVEL = 420;
 
 export function ListRowUnselected(p: RowProps) {
   return (
@@ -345,7 +398,11 @@ export function ListRow({
             }}
             style={styles.favoriteCircle}
           >
-            <HeartIcon size={20} />
+            {/* White @80% = not favorited; the heart takes its full red only
+                once the sound IS a favorite (WAV-25). */}
+            <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
+              <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
+            </View>
             <GlassEdge radius={34} />
           </PressableScale>
           <PressableScale onPress={onDelete} style={styles.deleteBtn}>
@@ -452,8 +509,11 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "center",
     gap: 5, padding: 10, borderRadius: 16, overflow: "hidden",
   },
-  rowInnerCard: { ...panelSurface },
-  albumArt: { width: 40, height: 40, borderRadius: 8 },
+  rowGlass: { borderRadius: 16, ...panelSurface },
+  sweep: { position: "absolute", left: 0, top: -(SWEEP_H - 60) / 2, width: SWEEP_W, height: SWEEP_H },
+  // Solid backing so the cover always reads 100% opaque, even over glass or
+  // when a video frame carries an alpha channel (WAV-25).
+  albumArt: { width: 40, height: 40, borderRadius: 8, backgroundColor: "#101010", opacity: 1 },
   coverGlyph: { alignItems: "center", justifyContent: "center", backgroundColor: COLORS.white10 },
   rowTitle: { flex: 1, minWidth: 0, fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "left" },
   rowTail: {
