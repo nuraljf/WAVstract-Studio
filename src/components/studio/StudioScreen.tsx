@@ -1,23 +1,24 @@
-// Full studio screen — pixel layout from Figma "Mobile-1" frame (402×811).
-// Now wired to the audio engine (WAV-16): Extract decodes a local file, the
-// list plays it, "+" sends it to the Timeline, and the slider drives speed+pitch.
+// Full studio screen — new fixed layout from Figma 244:3303. The timeline,
+// slider, extract button and filters stay put; ONLY the audio list scrolls
+// (Figma 244:3575), fading out under the bottom edge effect + tab bar.
 import React, { useState } from "react";
-import { View, ScrollView, Text, StyleSheet, SafeAreaView } from "react-native";
+import { View, ScrollView, Text, StyleSheet, SafeAreaView, Platform } from "react-native";
 import Timeline from "./Timeline";
 import SpeedSlider from "./SpeedSlider";
-import { FiltersRow, ListRow } from "./AudioList";
+import { FiltersRow, ListRow, EmptyTable } from "./AudioList";
 import TabBar, { type TabKey } from "./TabBar";
+import SettingsScreen from "./SettingsScreen";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import { UploadIcon } from "./icons";
 import { COLORS, FONT, FRAME_W, accentSurface } from "./theme";
 import { useStudio, fmtTime } from "../../lib/use-studio";
+import { LoadingBars } from "./LoadingBars";
 
-export default function StudioScreen() {
-  const [tab, setTab] = useState<TabKey>("studio");
+function StudioTab() {
   const {
-    sounds, activeId, isPlaying, position, positionSV, timelineSound, supported,
-    extract, togglePlay, addToTimeline, removeSound, toggleFavorite, seek, setSpeed,
+    sounds, activeId, isPlaying, position, positionSV, timelineSound, supported, cloudLoading,
+    extract, togglePlay, addToTimeline, removeSound, toggleFavorite, retryUpload, seek, setSpeed,
   } = useStudio();
 
   // The Timeline only reflects live playback when ITS sound is the one loaded in
@@ -26,64 +27,97 @@ export default function StudioScreen() {
   const timelineActive = !!timelineSound && timelineSound.id === activeId;
 
   return (
+    <View style={styles.studio}>
+      {/* fixed: timeline + speed slider */}
+      <View style={styles.timelineGroup}>
+        <Timeline
+          soundId={timelineSound?.id}
+          peaks={timelineSound?.peaks}
+          position={timelineActive ? position : 0}
+          positionSV={timelineActive ? positionSV : undefined}
+          duration={timelineSound?.duration ?? 0}
+          isPlaying={timelineActive && isPlaying}
+          onPlay={() => timelineSound && togglePlay(timelineSound.id)}
+          onSeek={timelineActive ? seek : undefined}
+        />
+        <SpeedSlider onChange={setSpeed} />
+      </View>
+
+      {/* fixed: extract + filters */}
+      <View style={styles.tableGroup}>
+        <PressableScale onPress={extract} style={styles.extract}>
+          <UploadIcon size={20} />
+          <Text style={styles.extractLabel}>Extract audio</Text>
+          <GlassEdge radius={34} />
+        </PressableScale>
+
+        <View style={styles.table}>
+          <FiltersRow />
+
+          {/* the ONLY scrollable region — the audio list */}
+          <ScrollView
+            style={styles.listScroll}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {sounds.length === 0 ? (
+              cloudLoading ? (
+                <View style={styles.cloudLoading}>
+                  <LoadingBars size={24} />
+                </View>
+              ) : supported ? (
+                <EmptyTable />
+              ) : (
+                <Text style={styles.empty}>Audio playback is web-only for now.</Text>
+              )
+            ) : (
+              sounds.map((s) => (
+                <ListRow
+                  key={s.id}
+                  title={s.name}
+                  duration={fmtTime(s.duration)}
+                  cover={s.cover}
+                  peaks={s.peaks}
+                  favorite={s.favorite}
+                  sync={s.sync}
+                  playing={isPlaying && s.id === activeId}
+                  onPlay={() => togglePlay(s.id)}
+                  onAdd={() => addToTimeline(s.id)}
+                  onDelete={() => removeSound(s.id)}
+                  onFavorite={() => toggleFavorite(s.id)}
+                  onRetry={() => retryUpload(s.id)}
+                />
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+export default function StudioScreen() {
+  const [tab, setTab] = useState<TabKey>("studio");
+
+  return (
     <SafeAreaView style={styles.safe}>
       {/* Phone-width frame, centered (so the web preview matches the device). */}
       <View style={styles.frame}>
-        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-          {/* Timeline + Speed slider group */}
-          <View style={styles.timelineGroup}>
-            <Timeline
-              soundId={timelineSound?.id}
-              peaks={timelineSound?.peaks}
-              position={timelineActive ? position : 0}
-              positionSV={timelineActive ? positionSV : undefined}
-              duration={timelineSound?.duration ?? 0}
-              isPlaying={timelineActive && isPlaying}
-              onPlay={() => timelineSound && togglePlay(timelineSound.id)}
-              onSeek={timelineActive ? seek : undefined}
-            />
-            <SpeedSlider onChange={setSpeed} />
+        {tab === "studio" ? (
+          <StudioTab />
+        ) : tab === "settings" ? (
+          <View style={styles.page}>
+            <SettingsScreen />
           </View>
-
-          {/* Extract audio primary action */}
-          <PressableScale onPress={extract} style={styles.extract}>
-            <UploadIcon size={20} />
-            <Text style={styles.extractLabel}>Extract audio</Text>
-            <GlassEdge radius={34} />
-          </PressableScale>
-
-          {/* Filters + list */}
-          <View style={styles.tableGroup}>
-            <FiltersRow />
-            <View style={styles.list}>
-              {sounds.length === 0 ? (
-                <Text style={styles.empty}>
-                  {supported
-                    ? "Press Extract audio to add a local file."
-                    : "Audio playback is web-only for now."}
-                </Text>
-              ) : (
-                sounds.map((s) => (
-                  <ListRow
-                    key={s.id}
-                    title={s.name}
-                    duration={fmtTime(s.duration)}
-                    cover={s.cover}
-                    peaks={s.peaks}
-                    favorite={s.favorite}
-                    playing={isPlaying && s.id === activeId}
-                    onPlay={() => togglePlay(s.id)}
-                    onAdd={() => addToTimeline(s.id)}
-                    onDelete={() => removeSound(s.id)}
-                    onFavorite={() => toggleFavorite(s.id)}
-                  />
-                ))
-              )}
-            </View>
+        ) : (
+          <View style={[styles.page, styles.centerPage]}>
+            <Text style={styles.empty}>Library is coming soon.</Text>
           </View>
-        </ScrollView>
+        )}
 
-        {/* Floating tab bar */}
+        {/* bottom edge effect (Figma 244:3572): content fades + blurs away
+            under the floating tab bar */}
+        <View pointerEvents="none" style={styles.edgeFade} />
         <View style={styles.tabBarHolder} pointerEvents="box-none">
           <TabBar active={tab} onChange={setTab} />
         </View>
@@ -95,15 +129,14 @@ export default function StudioScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "transparent" },
   frame: { flex: 1, width: "100%", maxWidth: FRAME_W, alignSelf: "center" },
-  scroll: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 120, // leave room for floating tab bar
-    gap: 30,
-    alignItems: "center",
-  },
+
+  studio: { flex: 1, paddingHorizontal: 20, paddingTop: 20, gap: 30 },
+  page: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
+  centerPage: { alignItems: "center", justifyContent: "center" },
+
   timelineGroup: { width: "100%", gap: 10, alignItems: "center" },
 
+  tableGroup: { flex: 1, width: "100%", gap: 30, alignItems: "center", minHeight: 0 },
   extract: {
     width: "100%",
     flexDirection: "row", alignItems: "center", justifyContent: "center",
@@ -116,11 +149,26 @@ const styles = StyleSheet.create({
     color: COLORS.white, textAlign: "center",
   },
 
-  tableGroup: { width: "100%", gap: 10, alignItems: "center" },
-  list: { gap: 10, width: "100%" },
+  table: { flex: 1, width: "100%", gap: 10, minHeight: 0 },
+  listScroll: { flex: 1, width: "100%" },
+  listContent: { gap: 10, paddingBottom: 120 }, // room to scroll past the tab bar
+  cloudLoading: { paddingVertical: 24, alignItems: "center" },
   empty: {
     fontFamily: FONT.geistRegular, fontSize: 13, color: COLORS.white50,
     textAlign: "center", paddingVertical: 16,
+  },
+
+  edgeFade: {
+    position: "absolute", left: 0, right: 0, bottom: 0, height: 84,
+    ...(Platform.OS === "web"
+      ? ({
+          backgroundImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.65) 100%)",
+          backdropFilter: "blur(5px)",
+          WebkitBackdropFilter: "blur(5px)",
+          maskImage: "linear-gradient(to bottom, transparent 0%, black 60%)",
+          WebkitMaskImage: "linear-gradient(to bottom, transparent 0%, black 60%)",
+        } as object)
+      : ({ backgroundColor: "rgba(0,0,0,0.5)" } as object)),
   },
 
   tabBarHolder: {
