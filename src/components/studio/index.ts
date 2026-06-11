@@ -10,6 +10,8 @@ export { PressableScale } from "./PressableScale";
 export { PopText } from "./PopText";
 export { MorphPlayPause } from "./MorphPlayPause";
 export { LoadingBars, ShimmerText, LoadingScreen } from "./LoadingBars";
+export { AmbientGradient } from "./AmbientGradient";
+export { WavstractLogo } from "./WavstractLogo";
 export * from "./AudioList";
 export * from "./icons";
 export * from "./theme";

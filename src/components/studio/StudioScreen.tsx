@@ -8,6 +8,7 @@ import SpeedSlider from "./SpeedSlider";
 import { FiltersRow, ListRow, EmptyTable } from "./AudioList";
 import TabBar, { type TabKey } from "./TabBar";
 import SettingsScreen from "./SettingsScreen";
+import { AmbientGradient } from "./AmbientGradient";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import { UploadIcon } from "./icons";
@@ -98,11 +99,16 @@ function StudioTab() {
 
 export default function StudioScreen() {
   const [tab, setTab] = useState<TabKey>("studio");
+  const { timelineSound, activeId, isPlaying } = useStudio();
+  const timelinePlaying = !!timelineSound && timelineSound.id === activeId && isPlaying;
 
   return (
     <SafeAreaView style={styles.safe}>
       {/* Phone-width frame, centered (so the web preview matches the device). */}
       <View style={styles.frame}>
+        {/* audio-reactive glow (WAV-30): appears only while the timeline's
+            sound is playing, and its layers ride the live band energies */}
+        {tab === "studio" && <AmbientGradient reactive playing={timelinePlaying} />}
         {tab === "studio" ? (
           <StudioTab />
         ) : tab === "settings" ? (

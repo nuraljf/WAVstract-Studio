@@ -24,7 +24,7 @@ import {
 } from "./theme";
 import { SPRING } from "./motion";
 import { LoadingBars, ShimmerText } from "./LoadingBars";
-import { player } from "../../lib/audio-engine";
+import { player, syntheticLevels } from "../../lib/audio-engine";
 import type { SyncState } from "../../lib/use-studio";
 
 const ALBUM_ART = require("./assets/album-art.png");
@@ -40,11 +40,11 @@ function CoverArt({ uri }: { uri?: string | null }) {
   );
 }
 
-// Real per-row visualizer (WAV-17 / WAV-25). Static loudness sparkline from
-// PCM peaks at 65% opacity when idle (emphasizes it isn't playing); while the
-// row is playing the bars ALWAYS move at full opacity — live from the engine's
-// analyser when it has a tap (buffer sources), otherwise a synthetic groove
-// (element/video sources play outside the Web Audio graph, WAV-22).
+// Real per-row visualizer (WAV-17 / WAV-25 / WAV-31). Static loudness
+// sparkline from PCM peaks at 65% opacity when idle; while the row is playing
+// the bars ALWAYS move at full opacity — live from the engine's analyser
+// (buffer sources, and element/video sources via the captureStream tap once it
+// carries signal), otherwise the shared synthetic groove.
 const MINI_N = 9;
 function MiniWave({ peaks, playing }: { peaks?: number[]; playing?: boolean }) {
   const [live, setLive] = React.useState<number[] | null>(null);
@@ -53,18 +53,16 @@ function MiniWave({ peaks, playing }: { peaks?: number[]; playing?: boolean }) {
       setLive(null);
       return;
     }
-    // Per-bar oscillation with mismatched frequencies/phases — reads as music
-    // even though no analyser data exists for element sources.
-    const synth = () => {
-      const t = performance.now() / 1000;
-      return Array.from({ length: MINI_N }, (_, i) =>
-        0.3 + 0.7 * Math.abs(Math.sin(t * (2.1 + (i % 4) * 0.9) + i * 1.9)));
-    };
     let raf = 0;
     let frame = 0;
     const loop = () => {
       // every 3rd frame (~20fps) — indistinguishable on a 20px meter, third the work
-      if (++frame % 3 === 0) setLive(player.hasLiveLevels ? player.levels(MINI_N) : synth());
+      if (++frame % 3 === 0) {
+        // levels() first: it also probes the element tap and flips
+        // hasLiveLevels the moment real signal shows up.
+        const lv = player.levels(MINI_N);
+        setLive(lv.length && player.hasLiveLevels ? lv : syntheticLevels(MINI_N));
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -373,14 +371,13 @@ export function ListRow({
   const baseStyle = useAnimatedStyle(() => ({
     marginRight: Math.min(open.value, 1.12) * REVEAL,
   }));
-  // Liquid-glass reveal (no fades): the actions live UNDER the base card and
-  // slide out of its trailing edge as it gives way — the clip window below
-  // hides whatever is still "inside" the card, so they appear to morph out of
-  // it, like swiping an iOS notification.
-  const actionsStyle = useAnimatedStyle(() => {
-    const e = Math.min(open.value, 1);
-    return { transform: [{ translateX: -(1 - e) * REVEAL }] };
-  });
+  // Liquid-glass reveal (no fades, WAV-31): the buttons sit at their final
+  // spots "behind" the base, and the clip window is EXACTLY the strip the base
+  // has vacated — never wider, so nothing shows through the translucent glass
+  // card. Swiping uncovers them in place, like iOS notification actions.
+  const windowStyle = useAnimatedStyle(() => ({
+    width: Math.min(open.value, 1.12) * REVEAL,
+  }));
   // The heart starts FUSED to the delete pill (gap closed) and breaks off once
   // the swipe commits — the "disconnect" moment of the liquid glass look.
   const heartStyle = useAnimatedStyle(() => {
@@ -395,8 +392,8 @@ export function ListRow({
       layout={LinearTransition.springify()}
       style={[styles.rowOuter, styles.rowSwipeOuter, p.style]}
     >
-      <View style={styles.actionsWrap} pointerEvents={editing ? "auto" : "none"}>
-        <Animated.View style={[styles.actionsRow, actionsStyle]}>
+      <Animated.View style={[styles.actionsWrap, windowStyle]} pointerEvents={editing ? "auto" : "none"}>
+        <View style={styles.actionsRow}>
           <Animated.View style={heartStyle}>
             <PressableScale
               onPress={() => {
@@ -418,8 +415,8 @@ export function ListRow({
             <Text style={styles.deleteLabel}>Delete</Text>
             <GlassEdge radius={16} />
           </PressableScale>
-        </Animated.View>
-      </View>
+        </View>
+      </Animated.View>
 
       <GestureDetector gesture={pan}>
         <Animated.View style={[styles.baseWrap, baseStyle]}>
@@ -560,17 +557,18 @@ const styles = StyleSheet.create({
     ...accentSurface,
   },
 
-  // swipe-revealed actions (pinned behind the base, right-aligned). The wrap
-  // clips, so the actions stay invisible while still "inside" the base card
-  // and slide out of its trailing edge as the swipe progresses (no fades).
+  // swipe-revealed actions: a right-anchored clip window whose width tracks
+  // the strip the base card has given up. The buttons are right-anchored
+  // INSIDE it at their final positions, so the swipe uncovers them in place
+  // (no fades, nothing visible through the glass base, WAV-31).
   actionsWrap: {
     position: "absolute", right: 0, top: 0, bottom: 0,
-    width: FAV_W + AGAP + DEL_W,
-    alignItems: "center", justifyContent: "flex-end",
-    flexDirection: "row",
     overflow: "hidden",
   },
-  actionsRow: { flexDirection: "row", alignItems: "center", gap: AGAP, height: "100%" },
+  actionsRow: {
+    position: "absolute", right: 0, top: 0, bottom: 0,
+    flexDirection: "row", alignItems: "center", gap: AGAP,
+  },
 
   // uploading / failed row states (Figma 244:3632 / 244:3716)
   statusInner: {

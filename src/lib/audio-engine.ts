@@ -184,6 +184,15 @@ function syntheticPeaks(count: number): number[] {
   return out;
 }
 
+/** Per-bar pseudo-music oscillation — the shared fallback meter for sources
+ *  with no analyser signal (WAV-25/31). Mismatched frequencies/phases so it
+ *  reads as music, not a metronome. */
+export function syntheticLevels(n: number): number[] {
+  const t = performance.now() / 1000;
+  return Array.from({ length: n }, (_, i) =>
+    0.3 + 0.7 * Math.abs(Math.sin(t * (2.1 + (i % 4) * 0.9) + i * 1.9)));
+}
+
 function setPreservesPitch(el: HTMLMediaElement, v: boolean) {
   const a = el as any;
   a.preservesPitch = v;
@@ -280,9 +289,18 @@ class Player {
   // createMediaElementSource): on iOS Safari that node fails to capture the
   // element's own output, so the song played twice slightly offset (the
   // "doubled / echo" bug, WAV-22) and rate changes stalled the pipeline.
-  // Cost: no live analyser bars for element sources — reliability wins.
   private el: HTMLMediaElement | null = null;
   private elDuration = 0;
+
+  // Live levels for element sources (WAV-31): captureStream() hands us a COPY
+  // of the element's audio — the element itself keeps playing to the speakers,
+  // so unlike createMediaElementSource this cannot double the output. The copy
+  // feeds an analyser that is connected to NOTHING downstream (read-only tap).
+  // Browsers without captureStream simply keep the synthetic meter.
+  private elAnalyser: AnalyserNode | null = null;
+  private elTap: MediaStreamAudioSourceNode | null = null;
+  private elFreq: Uint8Array<ArrayBuffer> | null = null;
+  private elTapLive = false; // any real signal observed yet?
 
   private gain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
@@ -339,28 +357,65 @@ class Player {
     return this.gain;
   }
 
-  /** Whether levels() can produce live data (buffer mode only — element
-   *  sources play outside the Web Audio graph, see the class comment). */
+  /** Whether levels() is currently producing REAL data — buffer sources
+   *  always, element sources once the captureStream tap has seen signal. */
   get hasLiveLevels(): boolean {
-    return this.mode === "buffer";
+    return this.mode === "buffer" || this.elTapLive;
   }
 
-  /** Live frequency magnitudes (0..1), downsampled to `n` bars. Empty when idle. */
+  /** Try to attach the read-only analyser tap to the playing element. Audio
+   *  tracks can appear only after playback starts, so this is retried from
+   *  play(). No-ops where captureStream is unsupported (the synthetic meter
+   *  stays in charge there). */
+  private ensureElementTap() {
+    if (this.elAnalyser || !this.el) return;
+    try {
+      const anyEl = this.el as any;
+      const stream: MediaStream | undefined =
+        anyEl.captureStream?.() ?? anyEl.mozCaptureStream?.();
+      if (!stream || stream.getAudioTracks().length === 0) return;
+      const ctx = getCtx();
+      this.elTap = ctx.createMediaStreamSource(stream);
+      this.elAnalyser = ctx.createAnalyser();
+      this.elAnalyser.fftSize = 64;
+      this.elFreq = new Uint8Array(this.elAnalyser.frequencyBinCount);
+      this.elTap.connect(this.elAnalyser); // tap only — NEVER to destination
+    } catch {
+      /* unsupported / not ready — synthetic fallback remains */
+    }
+  }
+
+  /** Live frequency magnitudes (0..1), downsampled to `n` bars. Empty when
+   *  idle or when no analyser is available (callers fall back to synthetic). */
   levels(n = 9): number[] {
-    if (this.mode === "element") return [];
-    if (!this.analyser || !this.freq || !this.playing) return [];
-    this.analyser.getByteFrequencyData(this.freq);
-    const bins = this.freq.length;
+    if (!this.playing) return [];
+    let analyser: AnalyserNode | null;
+    let freq: Uint8Array<ArrayBuffer> | null;
+    if (this.mode === "element") {
+      analyser = this.elAnalyser;
+      freq = this.elFreq;
+    } else {
+      analyser = this.analyser;
+      freq = this.freq;
+    }
+    if (!analyser || !freq) return [];
+    analyser.getByteFrequencyData(freq);
+    const bins = freq.length;
     const step = Math.max(1, Math.floor(bins / n));
     const out: number[] = [];
+    let peak = 0;
     for (let i = 0; i < n; i++) {
       let m = 0;
       for (let j = 0; j < step; j++) {
-        const v = this.freq[i * step + j] ?? 0;
+        const v = freq[i * step + j] ?? 0;
         if (v > m) m = v;
       }
+      if (m > peak) peak = m;
       out.push(m / 255);
     }
+    // The element tap is only trusted once it has demonstrably carried signal
+    // (some browsers expose a silent stream) — until then callers keep synth.
+    if (this.mode === "element" && peak > 10) this.elTapLive = true;
     return out;
   }
 
@@ -428,6 +483,10 @@ class Player {
       this.el.playbackRate = this.rate;
       void this.el.play().catch(() => {});
       this.playing = true;
+      // live-meter tap (WAV-31): tracks may only exist once playback runs
+      this.ensureElementTap();
+      setTimeout(() => this.ensureElementTap(), 350);
+      setTimeout(() => this.ensureElementTap(), 1200);
       return;
     }
 
@@ -550,6 +609,16 @@ class Player {
 
   private teardownElement() {
     if (!this.el) return;
+    try {
+      this.elTap?.disconnect();
+      this.elAnalyser?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    this.elTap = null;
+    this.elAnalyser = null;
+    this.elFreq = null;
+    this.elTapLive = false;
     try {
       this.el.pause();
       this.el.onended = null;
