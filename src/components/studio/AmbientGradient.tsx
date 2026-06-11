@@ -1,21 +1,20 @@
-// Living ambient gradient (WAV-30) — the design's blue glow (Figma 236:196)
-// that is never static, ElevenLabs-style:
-//   - drift     : every layer slowly breathes/wanders on independent loops
-//   - reactive  : while audio plays, a meter loop drives the layers with the
-//                 actual band energies (bass→base glow, mid/treble→blobs);
-//                 element/video sources use the captureStream tap, or the
-//                 shared synthetic groove where the browser can't tap
-// The studio mounts it with `reactive` — visible ONLY while the timeline's
-// sound is playing; onboarding mounts it always-on in drift mode.
+// Living ambient gradient (WAV-30) — the design's blue glow rebuilt as PURE
+// radial gradients (fully transparent around the glow — no baked black fill,
+// so it layers over any background, incl. the dev-mode image). Never static:
+//   - drift     : every layer breathes/wanders on independent loops
+//   - reactive  : while audio plays, the layers ride the actual band energies
+//                 (bass→base glow, mid/treble→blobs) via the engine analysers
+// The studio mounts it `anchor="top" reactive` — visible ONLY while the
+// timeline's sound plays; onboarding keeps the bottom anchor, always on.
 import React from "react";
-import { Image, Platform, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
+import { Platform, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated, {
   useSharedValue, useAnimatedStyle, withRepeat, withSequence, withTiming,
   Easing, cancelAnimation,
 } from "react-native-reanimated";
 import { player, syntheticLevels } from "../../lib/audio-engine";
 
-const GRADIENT = require("./assets/onboard-gradient.png");
+const web = Platform.OS === "web";
 
 const blob = (size: number, rgba: string): ViewStyle =>
   ({
@@ -23,7 +22,7 @@ const blob = (size: number, rgba: string): ViewStyle =>
     width: size,
     height: size,
     borderRadius: size / 2,
-    ...(Platform.OS === "web"
+    ...(web
       ? { backgroundImage: `radial-gradient(circle, ${rgba} 0%, rgba(26,98,255,0) 68%)` }
       : { backgroundColor: rgba, opacity: 0.35 }),
   }) as ViewStyle;
@@ -31,35 +30,49 @@ const blob = (size: number, rgba: string): ViewStyle =>
 export function AmbientGradient({
   reactive = false,
   playing = false,
+  anchor = "bottom",
   style,
 }: {
   /** true = studio mode: hidden until `playing`, layers ride the audio */
   reactive?: boolean;
   playing?: boolean;
+  /** which edge the glow hugs (onboarding: bottom; studio: top) */
+  anchor?: "bottom" | "top";
   style?: StyleProp<ViewStyle>;
 }) {
-  // --- slow ambient drift (always running; transform-only) ---
+  // energy pushes the layers AWAY from the anchored edge
+  const dir = anchor === "top" ? 1 : -1;
+
+  // --- ambient drift (always running; transform-only). Roomy enough to be
+  // clearly alive, slow enough to stay out of the way. ---
   const drift = useSharedValue(0);
   const wander = useSharedValue(0);
+  const sway = useSharedValue(0);
   React.useEffect(() => {
     drift.value = withRepeat(
-      withTiming(1, { duration: 9000, easing: Easing.inOut(Easing.sin) }),
+      withTiming(1, { duration: 7000, easing: Easing.inOut(Easing.sin) }),
       -1,
       true,
     );
     wander.value = withRepeat(
       withSequence(
-        withTiming(1, { duration: 13000, easing: Easing.inOut(Easing.quad) }),
-        withTiming(0, { duration: 15000, easing: Easing.inOut(Easing.quad) }),
+        withTiming(1, { duration: 11000, easing: Easing.inOut(Easing.quad) }),
+        withTiming(0, { duration: 13000, easing: Easing.inOut(Easing.quad) }),
       ),
       -1,
       false,
     );
+    sway.value = withRepeat(
+      withTiming(1, { duration: 17000, easing: Easing.inOut(Easing.sin) }),
+      -1,
+      true,
+    );
     return () => {
       cancelAnimation(drift);
       cancelAnimation(wander);
+      cancelAnimation(sway);
     };
-  }, [drift, wander]);
+  }, [drift, wander, sway]);
 
   // --- audio energies (attack fast, decay slow → watery, not jittery) ---
   const bass = useSharedValue(0);
@@ -90,45 +103,46 @@ export function AmbientGradient({
 
   // --- layer styles ---
   const containerStyle = useAnimatedStyle(() => ({
-    opacity: reactive
-      ? withTiming(playing ? 1 : 0, { duration: 600 })
-      : 1,
+    opacity: reactive ? withTiming(playing ? 1 : 0, { duration: 600 }) : 1,
   }));
 
-  // base glow: the exact design gradient, breathing + swelling with the bass
+  // base glow: breathing + swelling with the bass
   const baseStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: drift.value * 14 + bass.value * -18 },
-      { translateX: (wander.value - 0.5) * 24 },
-      { scale: 1.02 + drift.value * 0.05 + bass.value * 0.16 },
+      { translateY: dir * (drift.value * 26 + bass.value * 22) },
+      { translateX: (wander.value - 0.5) * 44 },
+      { scaleX: 1.02 + drift.value * 0.07 + bass.value * 0.14 },
+      { scaleY: 1.0 + sway.value * 0.08 + bass.value * 0.2 },
     ],
   }));
 
-  // left blob: mids — rises and grows on melody
+  // left blob: mids — pushes out and grows on melody
   const blobAStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: (0.5 - wander.value) * 60 - 20 },
-      { translateY: drift.value * -22 + mid.value * -46 },
-      { scale: 0.9 + drift.value * 0.1 + mid.value * 0.45 },
+      { translateX: (0.5 - wander.value) * 90 - 20 },
+      { translateY: dir * (drift.value * 34 + mid.value * 52) },
+      { scale: 0.85 + sway.value * 0.18 + mid.value * 0.45 },
     ],
   }));
 
   // right blob: treble — quick shimmer
   const blobBStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: (wander.value - 0.5) * 50 + 20 },
-      { translateY: drift.value * 18 + treble.value * -38 },
-      { scale: 0.85 + (1 - drift.value) * 0.12 + treble.value * 0.5 },
+      { translateX: (wander.value - 0.5) * 80 + 20 },
+      { translateY: dir * ((1 - drift.value) * 30 + treble.value * 44) },
+      { scale: 0.8 + (1 - drift.value) * 0.2 + treble.value * 0.5 },
     ],
   }));
 
+  const edge = anchor === "top" ? styles.glowTop : styles.glowBottom;
+  const aEdge = anchor === "top" ? { top: 40 } : { bottom: 60 };
+  const bEdge = anchor === "top" ? { top: -30 } : { bottom: -20 };
+
   return (
     <Animated.View pointerEvents="none" style={[styles.wrap, containerStyle, style]}>
-      <Animated.View style={[styles.base, baseStyle]}>
-        <Image source={GRADIENT} style={styles.baseImg} resizeMode="stretch" />
-      </Animated.View>
-      <Animated.View style={[blob(360, "rgba(26,98,255,0.5)"), styles.blobA, blobAStyle]} />
-      <Animated.View style={[blob(300, "rgba(86,150,255,0.42)"), styles.blobB, blobBStyle]} />
+      <Animated.View style={[styles.glow, edge, baseStyle]} />
+      <Animated.View style={[blob(360, "rgba(26,98,255,0.5)"), styles.blobA, aEdge, blobAStyle]} />
+      <Animated.View style={[blob(300, "rgba(86,150,255,0.42)"), styles.blobB, bEdge, blobBStyle]} />
     </Animated.View>
   );
 }
@@ -138,8 +152,32 @@ const styles = StyleSheet.create({
     position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
     overflow: "hidden",
   },
-  base: { position: "absolute", left: 0, right: 0, bottom: 0, height: 489 },
-  baseImg: { width: "100%", height: "100%" },
-  blobA: { left: -60, bottom: 60 },
-  blobB: { right: -50, bottom: -20 },
+  // the main glow — a soft ellipse hugging the anchored edge, transparent
+  // everywhere else (no black plate behind it)
+  glow: {
+    position: "absolute", left: -70, right: -70, height: 440,
+    ...(web
+      ? ({} as object)
+      : ({ backgroundColor: "rgba(26,98,255,0.22)", borderRadius: 220 } as object)),
+  },
+  glowBottom: {
+    bottom: -90,
+    ...(web
+      ? ({
+          backgroundImage:
+            "radial-gradient(72% 88% at 50% 100%, rgba(26,98,255,0.85) 0%, rgba(26,98,255,0.30) 46%, rgba(26,98,255,0) 74%)",
+        } as object)
+      : null),
+  },
+  glowTop: {
+    top: -90,
+    ...(web
+      ? ({
+          backgroundImage:
+            "radial-gradient(72% 88% at 50% 0%, rgba(26,98,255,0.85) 0%, rgba(26,98,255,0.30) 46%, rgba(26,98,255,0) 74%)",
+        } as object)
+      : null),
+  },
+  blobA: { left: -60 },
+  blobB: { right: -50 },
 });

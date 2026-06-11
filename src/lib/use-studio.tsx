@@ -164,11 +164,12 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   }, [stopTicker, syncPosition]);
 
   useEffect(() => {
-    // natural end → reset to stopped at 0
+    // natural end → loop: restart from 0 and keep going (element sources loop
+    // natively; this handles decoded-buffer sources)
     player.onEnded = () => {
-      setIsPlaying(false);
+      player.play(0);
       syncPosition(0);
-      stopTicker();
+      setIsPlaying(true);
     };
     // element files report their REAL duration late (and the upfront probe can
     // be wrong on iOS) — adopt it on the active sound so the timeline, the
@@ -344,9 +345,16 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     [uploadInBackground],
   );
 
+  // Switching to a different sound resets the speed slider to 1.0x — each
+  // track starts at its natural speed/pitch.
+  const resetSpeed = useCallback(() => {
+    player.setRate(1);
+    setSpeedState(1);
+  }, []);
+
   const playLoaded = useCallback(
     (id: string, source: PlayableSource) => {
-      player.setRate(player.speed);
+      resetSpeed();
       player.load(source);
       player.play(0);
       setActiveId(id);
@@ -354,7 +362,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       setIsPlaying(true);
       startTicker();
     },
-    [startTicker, syncPosition],
+    [startTicker, syncPosition, resetSpeed],
   );
 
   const togglePlay = useCallback(
@@ -371,13 +379,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (sound.source) {
-        player.setRate(speed);
-        player.load(sound.source);
-        player.play(0);
-        setActiveId(id);
-        syncPosition(0);
-        setIsPlaying(player.isPlaying);
-        if (player.isPlaying) startTicker();
+        playLoaded(id, sound.source);
         return;
       }
       // Cloud row, first play on this device: download → decode → play.
@@ -394,7 +396,6 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
             // PCM decode yields REAL peaks — upgrade the stored sparkline
             ...(peaks ? { peaks } : null),
           });
-          player.setRate(player.speed);
           playLoaded(id, source);
         })
         .catch((err) => {
@@ -402,7 +403,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
           patchSound(id, { sync: "synced" }); // row stays usable; tap to retry
         });
     },
-    [sounds, activeId, speed, startTicker, stopTicker, syncPosition, patchSound, playLoaded],
+    [sounds, activeId, startTicker, stopTicker, syncPosition, patchSound, playLoaded],
   );
 
   const addToTimeline = useCallback((id: string) => {

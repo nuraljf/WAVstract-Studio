@@ -15,7 +15,7 @@ import {
   PlayTriangle, DownloadIcon,
 } from "./icons";
 import { COLORS, FONT, FRAME_W, panelSurface } from "./theme";
-import { LoadingBars } from "./LoadingBars";
+import { LoadingBars, BlurVeil } from "./LoadingBars";
 import { useAuth } from "../../lib/use-auth";
 
 const LOGO_YT = require("./assets/logo-youtube.png");
@@ -102,30 +102,6 @@ export default function OnboardingScreen() {
     signInWith(provider).catch(() => setBusy(false));
   };
 
-  if (error) {
-    return (
-      <Animated.View entering={FadeIn.duration(220)} style={styles.full}>
-        <View style={styles.errorCenter}>
-          <ErrorTriangleIcon size={88} />
-          <Text style={styles.errorTitle}>ERROR</Text>
-          <Text style={styles.errorBody}>Something went wrong,{"\n"}Please try again later.</Text>
-          <PressableScale onPress={clearError} style={styles.retryBtn}>
-            <Text style={styles.retryLabel}>Retry</Text>
-            <GlassEdge radius={16} />
-          </PressableScale>
-        </View>
-      </Animated.View>
-    );
-  }
-
-  if (busy) {
-    return (
-      <Animated.View entering={FadeIn.duration(220)} style={styles.full}>
-        <LoadingBars size={28} />
-      </Animated.View>
-    );
-  }
-
   return (
     <View style={styles.full}>
       <View style={styles.frame}>
@@ -161,26 +137,61 @@ export default function OnboardingScreen() {
           <HeroTimelineCard />
         </View>
 
-        <Text style={styles.caption}>Sign up to sync your library across devices.</Text>
+        {/* caption + buttons hug the bottom edge so they never collide with
+            the centered hero on different screen heights */}
+        <View style={styles.bottom}>
+          <Text style={styles.caption}>Sign up to sync your library across devices.</Text>
 
-        <View style={styles.buttons}>
-          <PressableScale onPress={() => oauth("apple")} style={[styles.oauthBtn, styles.appleBtn]}>
-            <AppleIcon size={24} />
-            <Text style={styles.appleLabel}>Continue with Apple</Text>
-            <GlassEdge radius={16} />
-          </PressableScale>
+          <View style={styles.buttons}>
+            <PressableScale onPress={() => oauth("apple")} style={[styles.oauthBtn, styles.appleBtn]}>
+              <AppleIcon size={24} />
+              <Text style={styles.appleLabel}>Continue with Apple</Text>
+              <GlassEdge radius={16} />
+            </PressableScale>
 
-          <PressableScale onPress={() => oauth("google")} style={[styles.oauthBtn, styles.googleBtn]}>
-            <GoogleIcon size={24} />
-            <Text style={styles.googleLabel}>Continue with Google</Text>
-            <GlassEdge radius={16} />
-          </PressableScale>
+            <PressableScale onPress={() => oauth("google")} style={[styles.oauthBtn, styles.googleBtn]}>
+              <GoogleIcon size={24} />
+              <Text style={styles.googleLabel}>Continue with Google</Text>
+              <GlassEdge radius={16} />
+            </PressableScale>
 
-          <PressableScale onPress={continueAsGuest} style={styles.guestBtn}>
-            <Text style={styles.guestLabel}>Continue as Guest</Text>
-            <ChevronRightIcon size={20} />
-          </PressableScale>
+            <PressableScale onPress={continueAsGuest} style={styles.guestBtn}>
+              <Text style={styles.guestLabel}>Continue as Guest</Text>
+              <ChevronRightIcon size={20} />
+            </PressableScale>
+          </View>
         </View>
+
+        {/* universal states (Figma 237:761 / 238:1328): the screen stays
+            visible underneath a frosted veil — no black takeover */}
+        {busy && !error && (
+          <Animated.View entering={FadeIn.duration(200)} style={styles.stateLayer}>
+            <BlurVeil>
+              <LoadingBars size={28} />
+            </BlurVeil>
+          </Animated.View>
+        )}
+        {!!error && (
+          <Animated.View entering={FadeIn.duration(200)} style={styles.stateLayer}>
+            <BlurVeil>
+              <View style={styles.errorCenter}>
+                <ErrorTriangleIcon size={88} />
+                <Text style={styles.errorTitle}>ERROR</Text>
+                <Text style={styles.errorBody}>Something went wrong,{"\n"}Please try again later.</Text>
+                <PressableScale
+                  onPress={() => {
+                    clearError();
+                    setBusy(false);
+                  }}
+                  style={styles.retryBtn}
+                >
+                  <Text style={styles.retryLabel}>Retry</Text>
+                  <GlassEdge radius={16} />
+                </PressableScale>
+              </View>
+            </BlurVeil>
+          </Animated.View>
+        )}
       </View>
     </View>
   );
@@ -191,7 +202,9 @@ const styles = StyleSheet.create({
   frame: { flex: 1, width: "100%", maxWidth: FRAME_W, overflow: "hidden" },
 
   logo: { position: "absolute", left: 20, top: 56 },
-  title: { position: "absolute", left: 20, top: 109, width: 333, lineHeight: 40 * 0.96 + 4 },
+  // full frame width minus margins — "extracted instantly." must stay on ONE
+  // line (two lines total)
+  title: { position: "absolute", left: 20, top: 109, width: 362, lineHeight: 40 * 0.96 + 4 },
   titleBold: { fontFamily: FONT.geistSemibold, fontSize: 40, color: COLORS.white },
   titleItalic: {
     fontFamily: FONT.geistLight,
@@ -200,8 +213,12 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // hero geometry verbatim from Figma 236:200 (362×456 at top 178)
-  hero: { position: "absolute", alignSelf: "center", top: 178, width: 362, height: 456 },
+  // hero geometry verbatim from Figma 236:200 (362×456) — vertically CENTERED
+  // in the frame (the design centers it on the phone, top 178 on an 811 frame)
+  hero: {
+    position: "absolute", alignSelf: "center", top: "50%", marginTop: -228,
+    width: 362, height: 456,
+  },
   iconCardBox: {
     position: "absolute", width: 104.26, height: 104.26,
     alignItems: "center", justifyContent: "center",
@@ -254,12 +271,16 @@ const styles = StyleSheet.create({
   },
   mockSaveLabel: { fontFamily: FONT.sfSemibold, fontWeight: "600", fontSize: 12, color: COLORS.white },
 
+  bottom: {
+    position: "absolute", left: 0, right: 0, bottom: 40,
+    alignItems: "center", gap: 16,
+  },
   caption: {
-    position: "absolute", left: 20, top: 548,
+    alignSelf: "center", width: 362,
     fontFamily: FONT.sfRegular, fontSize: 14, color: COLORS.white80,
   },
-
-  buttons: { position: "absolute", top: 582, alignSelf: "center", gap: 10, alignItems: "center" },
+  buttons: { gap: 10, alignItems: "center" },
+  stateLayer: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0 },
   oauthBtn: {
     width: 362, height: 56, borderRadius: 16,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5,

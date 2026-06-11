@@ -13,8 +13,43 @@ import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import { UploadIcon } from "./icons";
 import { COLORS, FONT, FRAME_W, accentSurface } from "./theme";
-import { useStudio, fmtTime } from "../../lib/use-studio";
+import { useStudio, fmtTime, type Sound } from "../../lib/use-studio";
 import { LoadingBars } from "./LoadingBars";
+
+// Memoized row wrapper: while a sound plays, only the ACTIVE row's elapsed
+// label changes — every other row's props are stable, so they skip re-render
+// entirely. Re-rendering all rows each second re-attached their swipe
+// gestures, which is what froze list scrolling during playback.
+const SoundRow = React.memo(function SoundRow({
+  s, playing, timeLabel,
+  togglePlay, addToTimeline, removeSound, toggleFavorite, retryUpload,
+}: {
+  s: Sound;
+  playing: boolean;
+  timeLabel: string;
+  togglePlay: (id: string) => void;
+  addToTimeline: (id: string) => void;
+  removeSound: (id: string) => void;
+  toggleFavorite: (id: string) => void;
+  retryUpload: (id: string) => void;
+}) {
+  return (
+    <ListRow
+      title={s.name}
+      duration={timeLabel}
+      cover={s.cover}
+      peaks={s.peaks}
+      favorite={s.favorite}
+      sync={s.sync}
+      playing={playing}
+      onPlay={() => togglePlay(s.id)}
+      onAdd={() => addToTimeline(s.id)}
+      onDelete={() => removeSound(s.id)}
+      onFavorite={() => toggleFavorite(s.id)}
+      onRetry={() => retryUpload(s.id)}
+    />
+  );
+});
 
 function StudioTab() {
   const {
@@ -41,7 +76,9 @@ function StudioTab() {
           onPlay={() => timelineSound && togglePlay(timelineSound.id)}
           onSeek={timelineActive ? seek : undefined}
         />
-        <SpeedSlider onChange={setSpeed} />
+        {/* keyed by the active sound: switching tracks remounts the slider at
+            its 1.0x default (the engine rate is reset in use-studio) */}
+        <SpeedSlider key={activeId ?? "init"} onChange={setSpeed} />
       </View>
 
       {/* fixed: extract + filters */}
@@ -73,20 +110,17 @@ function StudioTab() {
               )
             ) : (
               sounds.map((s) => (
-                <ListRow
+                <SoundRow
                   key={s.id}
-                  title={s.name}
-                  duration={fmtTime(s.duration)}
-                  cover={s.cover}
-                  peaks={s.peaks}
-                  favorite={s.favorite}
-                  sync={s.sync}
+                  s={s}
                   playing={isPlaying && s.id === activeId}
-                  onPlay={() => togglePlay(s.id)}
-                  onAdd={() => addToTimeline(s.id)}
-                  onDelete={() => removeSound(s.id)}
-                  onFavorite={() => toggleFavorite(s.id)}
-                  onRetry={() => retryUpload(s.id)}
+                  // active row rolls the live elapsed second; others show length
+                  timeLabel={s.id === activeId ? fmtTime(position) : fmtTime(s.duration)}
+                  togglePlay={togglePlay}
+                  addToTimeline={addToTimeline}
+                  removeSound={removeSound}
+                  toggleFavorite={toggleFavorite}
+                  retryUpload={retryUpload}
                 />
               ))
             )}
@@ -106,9 +140,10 @@ export default function StudioScreen() {
     <SafeAreaView style={styles.safe}>
       {/* Phone-width frame, centered (so the web preview matches the device). */}
       <View style={styles.frame}>
-        {/* audio-reactive glow (WAV-30): appears only while the timeline's
-            sound is playing, and its layers ride the live band energies */}
-        {tab === "studio" && <AmbientGradient reactive playing={timelinePlaying} />}
+        {/* audio-reactive glow (WAV-30): hugs the TOP edge in the studio,
+            appears only while the timeline's sound is playing, and its layers
+            ride the live band energies */}
+        {tab === "studio" && <AmbientGradient reactive anchor="top" playing={timelinePlaying} />}
         {tab === "studio" ? (
           <StudioTab />
         ) : tab === "settings" ? (
