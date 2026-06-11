@@ -73,7 +73,8 @@ function StudioTab() {
           positionSV={timelineActive ? positionSV : undefined}
           duration={timelineSound?.duration ?? 0}
           isPlaying={timelineActive && isPlaying}
-          onPlay={() => timelineSound && togglePlay(timelineSound.id)}
+          // the timeline is the ONLY place a pause keeps its position
+          onPlay={() => timelineSound && togglePlay(timelineSound.id, true)}
           onSeek={timelineActive ? seek : undefined}
         />
         {/* keyed by the active sound: switching tracks remounts the slider at

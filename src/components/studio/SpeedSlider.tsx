@@ -149,9 +149,10 @@ export default function SpeedSlider({
           {/* active fill (capsule) */}
           <Animated.View style={[styles.fill, fillStyle]} />
 
-          {/* knob — solid white circle per the new studio design (244:3430) */}
+          {/* knob — original design: accent ring with the white core, so the
+              track's blue never halos around a bare white circle */}
           <Animated.View style={[styles.knobWrap, thumbStyle]}>
-            <View style={styles.knobOuter} />
+            <View style={styles.knobOuter}><View style={styles.knobInner} /></View>
           </Animated.View>
 
           {/* Ticks render ON TOP of fill + thumb, at exact 0.1 value positions. */}
@@ -233,9 +234,10 @@ const styles = StyleSheet.create({
   },
   knobOuter: {
     width: THUMB, height: THUMB, borderRadius: THUMB / 2,
-    backgroundColor: COLORS.white,
-    ...SHADOW_SMALL,
+    alignItems: "center", justifyContent: "center",
+    backgroundColor: COLORS.accent,
   },
+  knobInner: { width: 16, height: 16, borderRadius: 8, backgroundColor: COLORS.white },
 
   tooltipLane: { width: "100%", height: 40 },
   tooltip: { position: "absolute", top: 0, left: 0, width: TOOLTIP_W, alignItems: "center" },

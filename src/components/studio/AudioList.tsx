@@ -447,7 +447,11 @@ export function ListRow({
         </View>
       </Animated.View>
 
-      <GestureDetector gesture={pan}>
+      {/* touchAction pan-y: the browser keeps native VERTICAL scrolling even
+          when the touch starts on this row — the handler only claims clearly
+          horizontal moves. Without it, touching any row killed list scrolling
+          on the phone. */}
+      <GestureDetector gesture={pan} touchAction="pan-y">
         <Animated.View style={[styles.baseWrap, baseStyle]}>
           <RowInner
             {...p}

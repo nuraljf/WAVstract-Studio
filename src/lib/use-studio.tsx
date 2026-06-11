@@ -73,7 +73,7 @@ type StudioState = {
   timelineSound: Sound | null;
   activeSound: Sound | null;
   extract: () => void;
-  togglePlay: (id: string) => void;
+  togglePlay: (id: string, keepPosition?: boolean) => void;
   addToTimeline: (id: string) => void;
   removeSound: (id: string) => void;
   toggleFavorite: (id: string) => void;
@@ -365,12 +365,15 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     [startTicker, syncPosition, resetSpeed],
   );
 
+  // keepPosition: the TIMELINE pauses in place; the TABLE treats a pause as
+  // "unselect" and rewinds to 0 — no stored position outside the timeline.
   const togglePlay = useCallback(
-    (id: string) => {
+    (id: string, keepPosition = false) => {
       const sound = sounds.find((s) => s.id === id);
       if (!sound) return;
       if (activeId === id && sound.source) {
         player.toggle();
+        if (!player.isPlaying && !keepPosition) player.seek(0);
         if (!player.isPlaying) syncPosition(player.currentTime);
         const nowPlaying = player.isPlaying;
         setIsPlaying(nowPlaying);
