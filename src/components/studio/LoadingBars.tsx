@@ -106,10 +106,23 @@ export function ShimmerText({ children, style }: { children: React.ReactNode; st
 }
 
 /** Frosted overlay for the universal loading / failed states (Figma 237:761):
- *  the screen underneath stays visible but heavily blurred + dimmed, with the
- *  state content centered on top. */
+ *  the screen underneath stays visible, blurred + dimmed in a vertical grade —
+ *  the bottom is BLURRIER and DARKER than the top (WAV-45). Web layers: a base
+ *  backdrop blur, a stronger bottom-weighted blur faded in by a mask, and a
+ *  dark gradient tint. Native keeps the solid dim fallback. */
 export function BlurVeil({ children }: { children: React.ReactNode }) {
-  return <View style={styles.veil}>{children}</View>;
+  return (
+    <View style={styles.veil}>
+      {Platform.OS === "web" && (
+        <>
+          <View style={styles.veilBlurBase} />
+          <View style={styles.veilBlurBottom} />
+          <View style={styles.veilTint} />
+        </>
+      )}
+      {children}
+    </View>
+  );
 }
 
 /** The universal busy state (Figma 237:761): bars centered on the veil.
@@ -157,11 +170,25 @@ const styles = StyleSheet.create({
   veil: {
     position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
     alignItems: "center", justifyContent: "center",
-    backgroundColor: "rgba(5,5,5,0.35)",
-    ...(Platform.OS === "web"
-      ? ({ backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)" } as object)
-      : ({ backgroundColor: "rgba(5,5,5,0.8)" } as object)),
+    ...(Platform.OS === "web" ? null : ({ backgroundColor: "rgba(5,5,5,0.8)" } as object)),
   },
+  veilBlurBase: {
+    position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+    backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+  } as object,
+  // stronger blur fading in toward the bottom (its backdrop is the base
+  // layer's output, so the two compound where the mask is opaque)
+  veilBlurBottom: {
+    position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+    backdropFilter: "blur(26px)", WebkitBackdropFilter: "blur(26px)",
+    maskImage: "linear-gradient(to bottom, transparent 25%, black 80%)",
+    WebkitMaskImage: "linear-gradient(to bottom, transparent 25%, black 80%)",
+  } as object,
+  veilTint: {
+    position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
+    backgroundImage:
+      "linear-gradient(to bottom, rgba(5,5,5,0.25) 0%, rgba(5,5,5,0.45) 55%, rgba(5,5,5,0.82) 100%)",
+  } as object,
 
   errorCenter: { alignItems: "center", gap: 10, paddingHorizontal: 40 },
   errorTitle: {

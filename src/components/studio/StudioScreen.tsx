@@ -9,6 +9,7 @@ import { FiltersRow, ListRow, EmptyTable } from "./AudioList";
 import TabBar, { type TabKey } from "./TabBar";
 import SettingsScreen from "./SettingsScreen";
 import { AmbientGradient } from "./AmbientGradient";
+import { PageTransition } from "./PageTransition";
 import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import { UploadIcon } from "./icons";
@@ -145,17 +146,20 @@ export default function StudioScreen() {
             appears only while the timeline's sound is playing, and its layers
             ride the live band energies */}
         {tab === "studio" && <AmbientGradient reactive anchor="top" playing={timelinePlaying} />}
-        {tab === "studio" ? (
-          <StudioTab />
-        ) : tab === "settings" ? (
-          <View style={styles.page}>
-            <SettingsScreen />
-          </View>
-        ) : (
-          <View style={[styles.page, styles.centerPage]}>
-            <Text style={styles.empty}>Library is coming soon.</Text>
-          </View>
-        )}
+        {/* tab pages resize in through the shared blur transition (WAV-47) */}
+        <PageTransition id={tab}>
+          {tab === "studio" ? (
+            <StudioTab />
+          ) : tab === "settings" ? (
+            <View style={styles.page}>
+              <SettingsScreen />
+            </View>
+          ) : (
+            <View style={[styles.page, styles.centerPage]}>
+              <Text style={styles.empty}>Library is coming soon.</Text>
+            </View>
+          )}
+        </PageTransition>
 
         {/* bottom edge effect (Figma 244:3572): content fades + blurs away
             under the floating tab bar */}

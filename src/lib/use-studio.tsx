@@ -40,6 +40,10 @@ import {
 } from "./audio-engine";
 import { useAuth } from "./use-auth";
 import * as cloud from "./cloud";
+import {
+  saveLocalSound, listLocalSounds, patchLocalSound, deleteLocalSound,
+  type LocalSoundRow,
+} from "./local-store";
 
 export type SyncState = "local" | "uploading" | "synced" | "failed" | "downloading";
 
@@ -87,6 +91,23 @@ const StudioContext = createContext<StudioState | null>(null);
 let idCounter = 0;
 const nextId = () => `snd_${Date.now()}_${idCounter++}`;
 
+// A sound restored from the on-device store (WAV-44): metadata is instant,
+// audio decodes lazily from the kept file on first play — like a cloud row.
+function soundFromLocalRow(r: LocalSoundRow): Sound {
+  return {
+    id: r.id,
+    name: r.name,
+    peaks: r.peaks,
+    duration: r.duration,
+    cover: r.cover,
+    favorite: r.favorite,
+    source: null,
+    sync: "local",
+    mime: r.mime,
+    file: new File([r.blob], r.name, { type: r.mime ?? "" }),
+  };
+}
+
 function baseName(filename: string): string {
   return filename.replace(/\.[^./\\]+$/, "");
 }
@@ -116,6 +137,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   activeIdRef.current = activeId;
   const userIdRef = useRef<string | null>(null);
   userIdRef.current = userId;
+  const migratedFor = useRef<string | null>(null); // local→cloud ran for this user
 
   const patchSound = useCallback((id: string, patch: Partial<Sound>) => {
     setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -182,16 +204,19 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
           s.id === id && Math.abs(s.duration - d) > 0.05 ? { ...s, duration: d } : s,
         ),
       );
+      patchLocalSound(id, { duration: d }).catch(() => {});
     };
     // Background analysis of an element/video source finished (WAV-33) — swap
     // the synthetic sparkline for the file's REAL waveform wherever it shows.
     player.onPeaks = (url, peaks) => {
       setSounds((prev) =>
-        prev.map((s) =>
-          s.source?.kind === "element" && s.source.url === url && s.peaks !== peaks
-            ? { ...s, peaks }
-            : s,
-        ),
+        prev.map((s) => {
+          if (s.source?.kind === "element" && s.source.url === url && s.peaks !== peaks) {
+            patchLocalSound(s.id, { peaks }).catch(() => {}); // idempotent
+            return { ...s, peaks };
+          }
+          return s;
+        }),
       );
     };
     return () => {
@@ -202,10 +227,46 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     };
   }, [stopTicker, syncPosition]);
 
+  // ---- background upload (signed-in extracts, retries, migration) ----
+  const uploadInBackground = useCallback(
+    (id: string, snd: Pick<Sound, "name" | "duration" | "peaks" | "cover" | "favorite">, file: File) => {
+      const uid = userIdRef.current;
+      if (!uid) return;
+      patchSound(id, { sync: "uploading" });
+      cloud
+        .uploadSound({
+          userId: uid,
+          file,
+          mime: file.type || "application/octet-stream",
+          name: snd.name,
+          duration: snd.duration,
+          peaks: snd.peaks,
+          cover: snd.cover,
+          favorite: snd.favorite,
+        })
+        .then((row) => {
+          patchSound(id, {
+            sync: "synced",
+            cloudId: row.id,
+            filePath: row.file_path,
+            mime: row.mime,
+            file: undefined,
+          });
+          // the cloud owns it now — drop the on-device copy (WAV-44)
+          deleteLocalSound(id).catch(() => {});
+        })
+        .catch((err) => {
+          console.error("[studio] upload failed", err);
+          patchSound(id, { sync: "failed" });
+        });
+    },
+    [patchSound],
+  );
+
   // ---- cloud library: load on sign-in, clear on sign-out ----
   useEffect(() => {
     if (!userId) {
-      // Signed out (or guest): the account library leaves with the account.
+      // Signed out (or guest): the account library leaves with the account…
       setSounds((prev) => {
         prev.forEach((s) => {
           if (s.source?.kind === "element") URL.revokeObjectURL(s.source.url);
@@ -214,7 +275,22 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       });
       setTimelineId(null);
       resetPlayback();
-      return;
+      // …and the on-device store restores the guest library (WAV-44), so a
+      // reload never resets the table.
+      let cancelled = false;
+      listLocalSounds()
+        .then((rows) => {
+          if (cancelled || rows.length === 0) return;
+          setSounds((prev) => {
+            const known = new Set(prev.map((s) => s.id));
+            const restored = rows.filter((r) => !known.has(r.id)).map(soundFromLocalRow);
+            return [...restored.reverse(), ...prev]; // newest extract on top
+          });
+        })
+        .catch(() => {});
+      return () => {
+        cancelled = true;
+      };
     }
     let cancelled = false;
     setCloudLoading(true);
@@ -244,44 +320,37 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((err) => console.error("[studio] cloud list failed", err))
       .finally(() => !cancelled && setCloudLoading(false));
+
+    // One-time per sign-in (WAV-44): sounds in the on-device store — guest
+    // extracts, or rows stranded by a failed upload — move into the account.
+    // Their local copies are deleted as each upload lands.
+    if (migratedFor.current !== userId) {
+      migratedFor.current = userId;
+      listLocalSounds()
+        .then((rows) => {
+          if (cancelled || rows.length === 0) return;
+          setSounds((prev) => {
+            const known = new Set(prev.map((s) => s.id));
+            const fresh = rows
+              .filter((r) => !known.has(r.id))
+              .map((r) => ({ ...soundFromLocalRow(r), sync: "uploading" as SyncState }));
+            return [...fresh.reverse(), ...prev];
+          });
+          rows.forEach((r) => {
+            uploadInBackground(
+              r.id,
+              { name: r.name, duration: r.duration, peaks: r.peaks, cover: r.cover, favorite: r.favorite },
+              new File([r.blob], r.name, { type: r.mime ?? "" }),
+            );
+          });
+        })
+        .catch(() => {});
+    }
+
     return () => {
       cancelled = true;
     };
-  }, [userId, resetPlayback]);
-
-  // ---- background upload (signed-in extracts + retries) ----
-  const uploadInBackground = useCallback(
-    (id: string, snd: Pick<Sound, "name" | "duration" | "peaks" | "cover" | "favorite">, file: File) => {
-      const uid = userIdRef.current;
-      if (!uid) return;
-      patchSound(id, { sync: "uploading" });
-      cloud
-        .uploadSound({
-          userId: uid,
-          file,
-          mime: file.type || "application/octet-stream",
-          name: snd.name,
-          duration: snd.duration,
-          peaks: snd.peaks,
-          cover: snd.cover,
-          favorite: snd.favorite,
-        })
-        .then((row) => {
-          patchSound(id, {
-            sync: "synced",
-            cloudId: row.id,
-            filePath: row.file_path,
-            mime: row.mime,
-            file: undefined,
-          });
-        })
-        .catch((err) => {
-          console.error("[studio] upload failed", err);
-          patchSound(id, { sync: "failed" });
-        });
-    },
-    [patchSound],
-  );
+  }, [userId, resetPlayback, uploadInBackground]);
 
   // ---- actions ----
   const extract = useCallback(() => {
@@ -322,10 +391,25 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         // does not start playing. Playback begins when the user presses the row.
         setSounds((prev) => [sound, ...prev]);
 
+        // Persist on-device (WAV-44): guests get a durable library; signed-in
+        // rows keep the local copy only until the upload lands.
+        saveLocalSound({
+          id,
+          name: sound.name,
+          duration,
+          peaks,
+          favorite: false,
+          cover: null,
+          mime: file.type || null,
+          blob: file,
+          createdAt: Date.now(),
+        }).catch(() => {});
+
         extractCover(file)
           .then((cover) => {
             if (!cover) return;
             setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, cover } : s)));
+            patchLocalSound(id, { cover }).catch(() => {});
           })
           .catch(() => {});
 
@@ -397,6 +481,43 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         playLoaded(id, sound.source);
         return;
       }
+      // Restored local row (WAV-44): the audio lives in the on-device store —
+      // decode from the kept file on first play, like a cloud download.
+      if (sound.file) {
+        const prevSync = sound.sync;
+        patchSound(id, { sync: "downloading" });
+        sourceFromBlob(sound.file, sound.mime ?? null, sound.duration)
+          .then(({ source, duration, peaks }) => {
+            setSounds((prev) =>
+              prev.map((s) =>
+                s.id === id
+                  ? {
+                      ...s,
+                      source,
+                      duration: duration > 0 ? duration : s.duration,
+                      ...(peaks ? { peaks } : null),
+                      // an upload may have finished meanwhile — only undo OUR flag
+                      sync: s.sync === "downloading" ? prevSync : s.sync,
+                    }
+                  : s,
+              ),
+            );
+            patchLocalSound(id, {
+              ...(peaks ? { peaks } : null),
+              ...(duration > 0 ? { duration } : null),
+            }).catch(() => {});
+            playLoaded(id, source);
+          })
+          .catch((err) => {
+            console.error("[studio] local decode failed", err);
+            setSounds((prev) =>
+              prev.map((s) =>
+                s.id === id && s.sync === "downloading" ? { ...s, sync: prevSync } : s,
+              ),
+            );
+          });
+        return;
+      }
       // Cloud row, first play on this device: download → decode → play.
       if (!sound.filePath || sound.sync === "downloading") return;
       patchSound(id, { sync: "downloading" });
@@ -439,6 +560,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
             console.error("[studio] cloud delete failed", err),
           );
         }
+        deleteLocalSound(id).catch(() => {}); // no-op when not stored
         return prev.filter((s) => s.id !== id);
       });
       setTimelineId((t) => (t === id ? null : t));
@@ -459,6 +581,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
             console.error("[studio] favorite sync failed", err),
           );
         }
+        patchLocalSound(id, { favorite }).catch(() => {});
         return { ...s, favorite };
       }),
     );

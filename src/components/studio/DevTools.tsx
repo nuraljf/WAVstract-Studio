@@ -7,7 +7,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { View, Text, Image, Pressable, Platform, StyleSheet } from "react-native";
 import Animated, {
-  useSharedValue, useAnimatedStyle, withTiming, runOnJS,
+  useSharedValue, useAnimatedStyle, withTiming,
 } from "react-native-reanimated";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { GlassEdge } from "./Glass";
@@ -46,37 +46,14 @@ export function DevTools({ children }: { children: React.ReactNode }) {
     });
   };
 
-  // The DEV chip can sit over whatever is being tested — hold it for 1s and it
-  // becomes draggable, carrying the whole control cluster (WAV-38).
+  // The DEV chip can sit over whatever is being tested — hold it still for 1s
+  // and it becomes draggable, carrying the whole control cluster (WAV-38/48).
+  // Plain DOM pointer events: RNGH's activateAfterLongPress never activates on
+  // web, which is why the first version couldn't be dragged anywhere.
   const dragX = useSharedValue(0);
   const dragY = useSharedValue(0);
-  const dragStartX = useSharedValue(0);
-  const dragStartY = useSharedValue(0);
   const grabbed = useSharedValue(0);
   const lastDragAt = useRef(0);
-  const markDrag = () => {
-    lastDragAt.current = Date.now();
-  };
-  const devDrag = React.useMemo(
-    () =>
-      Gesture.Pan()
-        .activateAfterLongPress(1000)
-        .onStart(() => {
-          dragStartX.value = dragX.value;
-          dragStartY.value = dragY.value;
-          grabbed.value = withTiming(1, { duration: 140 });
-        })
-        .onUpdate((e) => {
-          dragX.value = dragStartX.value + e.translationX;
-          dragY.value = dragStartY.value + e.translationY;
-        })
-        .onFinalize(() => {
-          if (grabbed.value > 0) runOnJS(markDrag)(); // swallow the release click
-          grabbed.value = withTiming(0, { duration: 140 });
-        }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
   const devLayerStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: dragX.value }, { translateY: dragY.value }],
   }));
@@ -88,6 +65,46 @@ export function DevTools({ children }: { children: React.ReactNode }) {
     if (Date.now() - lastDragAt.current < 350) return; // drag release, not a tap
     setOpen((o) => !o);
   };
+  // pointerdown arrives via a React prop on a real <div> (a View ref isn't a
+  // reliable addEventListener target); move/up ride window-level listeners so
+  // the drag never loses the pointer.
+  const chipDown = React.useMemo(() => {
+    const st = { timer: 0, dragging: false, sx: 0, sy: 0, bx: 0, by: 0 };
+    const move = (e: PointerEvent) => {
+      if (!st.dragging) {
+        // moved away before the hold completed — it's a tap, not a grab
+        if (Math.hypot(e.clientX - st.sx, e.clientY - st.sy) > 8) window.clearTimeout(st.timer);
+        return;
+      }
+      dragX.value = st.bx + (e.clientX - st.sx);
+      dragY.value = st.by + (e.clientY - st.sy);
+    };
+    const up = () => {
+      window.clearTimeout(st.timer);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (st.dragging) {
+        st.dragging = false;
+        lastDragAt.current = Date.now(); // swallow the release click
+        grabbed.value = withTiming(0, { duration: 140 });
+      }
+    };
+    return (e: { clientX: number; clientY: number }) => {
+      st.sx = e.clientX;
+      st.sy = e.clientY;
+      st.bx = dragX.value;
+      st.by = dragY.value;
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+      st.timer = window.setTimeout(() => {
+        st.dragging = true;
+        grabbed.value = withTiming(1, { duration: 140 });
+      }, 1000);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keep panning within bounds so zoomed content can't be scrolled off-screen.
   const clampPan = (z: number) => {
@@ -228,14 +245,25 @@ export function DevTools({ children }: { children: React.ReactNode }) {
 
       {/* fixed dev controls (not zoomed; draggable via 1s hold on the chip) */}
       <Animated.View style={[styles.devLayer, devLayerStyle]} pointerEvents="box-none">
-        <GestureDetector gesture={devDrag} touchAction="none">
-          <Animated.View style={chipStyle}>
+        <Animated.View style={chipStyle}>
+          {/* real <div>: guaranteed pointer events; touchAction none keeps iOS
+              from turning the 1s hold into a scroll */}
+          {Platform.OS === "web" ? (
+            React.createElement(
+              "div",
+              { onPointerDown: chipDown, style: { touchAction: "none" } },
+              <Pressable onPress={toggleOpen} style={styles.devToggle}>
+                <Text style={styles.devToggleText}>{open ? "✕" : "DEV"}</Text>
+                <GlassEdge radius={16} />
+              </Pressable>,
+            )
+          ) : (
             <Pressable onPress={toggleOpen} style={styles.devToggle}>
               <Text style={styles.devToggleText}>{open ? "✕" : "DEV"}</Text>
               <GlassEdge radius={16} />
             </Pressable>
-          </Animated.View>
-        </GestureDetector>
+          )}
+        </Animated.View>
 
         {open ? (
           <View style={styles.panel}>
