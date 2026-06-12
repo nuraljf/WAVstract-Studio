@@ -188,7 +188,9 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     player.onPeaks = (url, peaks) => {
       setSounds((prev) =>
         prev.map((s) =>
-          s.source?.kind === "element" && s.source.url === url ? { ...s, peaks } : s,
+          s.source?.kind === "element" && s.source.url === url && s.peaks !== peaks
+            ? { ...s, peaks }
+            : s,
         ),
       );
     };
