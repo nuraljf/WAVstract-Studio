@@ -7,20 +7,29 @@
 import React, { useState, useRef, useEffect } from "react";
 import { View, Text, Image, Pressable, Platform, StyleSheet } from "react-native";
 import Animated, {
-  useSharedValue, useAnimatedStyle, withTiming,
+  useSharedValue, useAnimatedStyle, withTiming, runOnJS,
 } from "react-native-reanimated";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { GlassEdge } from "./Glass";
+import { LoadingVeil, ErrorVeil } from "./LoadingBars";
 import { COLORS, FONT, panelSurface } from "./theme";
 
 const MIN_Z = 1;
 const MAX_Z = 5;
+
+// The background picker input lives in the DOM and is module-retained for the
+// sheet's whole life — iOS Safari GCs a detached input before `change` fires
+// (the WAV-22 lesson; this is why the picked photo never appeared, WAV-38).
+let bgInput: HTMLInputElement | null = null;
 
 export function DevTools({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [inspect, setInspect] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [bg, setBg] = useState<string | null>(null);
+  // state-preview veils (WAV-40): overlay the production loading / error
+  // components on whatever page is showing, for 1:1 Figma comparison
+  const [veil, setVeil] = useState<"none" | "loading" | "error">("none");
 
   const scale = useSharedValue(1);
   const panX = useSharedValue(0);
@@ -28,6 +37,57 @@ export function DevTools({ children }: { children: React.ReactNode }) {
   const startX = useSharedValue(0);
   const startY = useSharedValue(0);
   const rootRef = useRef<any>(null);
+
+  // swap (or clear) the dev background, releasing the previous object URL
+  const setBackground = (url: string | null) => {
+    setBg((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return url;
+    });
+  };
+
+  // The DEV chip can sit over whatever is being tested — hold it for 1s and it
+  // becomes draggable, carrying the whole control cluster (WAV-38).
+  const dragX = useSharedValue(0);
+  const dragY = useSharedValue(0);
+  const dragStartX = useSharedValue(0);
+  const dragStartY = useSharedValue(0);
+  const grabbed = useSharedValue(0);
+  const lastDragAt = useRef(0);
+  const markDrag = () => {
+    lastDragAt.current = Date.now();
+  };
+  const devDrag = React.useMemo(
+    () =>
+      Gesture.Pan()
+        .activateAfterLongPress(1000)
+        .onStart(() => {
+          dragStartX.value = dragX.value;
+          dragStartY.value = dragY.value;
+          grabbed.value = withTiming(1, { duration: 140 });
+        })
+        .onUpdate((e) => {
+          dragX.value = dragStartX.value + e.translationX;
+          dragY.value = dragStartY.value + e.translationY;
+        })
+        .onFinalize(() => {
+          if (grabbed.value > 0) runOnJS(markDrag)(); // swallow the release click
+          grabbed.value = withTiming(0, { duration: 140 });
+        }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const devLayerStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: dragX.value }, { translateY: dragY.value }],
+  }));
+  const chipStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + grabbed.value * 0.08 }],
+    opacity: 1 - grabbed.value * 0.15,
+  }));
+  const toggleOpen = () => {
+    if (Date.now() - lastDragAt.current < 350) return; // drag release, not a tap
+    setOpen((o) => !o);
+  };
 
   // Keep panning within bounds so zoomed content can't be scrolled off-screen.
   const clampPan = (z: number) => {
@@ -100,19 +160,24 @@ export function DevTools({ children }: { children: React.ReactNode }) {
   };
 
   const pickBackground = () => {
-    if (Platform.OS === "web") {
-      const doc: any = (globalThis as any).document;
-      const input = doc.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.onchange = (e: any) => {
-        const file = e.target.files?.[0];
-        if (file) setBg(URL.createObjectURL(file));
-      };
-      input.click();
-    } else {
-      // Native: wire up expo-image-picker here when needed.
-    }
+    if (Platform.OS !== "web" || typeof document === "undefined") return;
+    bgInput?.remove();
+    const input = document.createElement("input");
+    bgInput = input;
+    input.type = "file";
+    input.accept = "image/*";
+    input.style.display = "none";
+    const cleanup = () => {
+      input.remove();
+      if (bgInput === input) bgInput = null;
+    };
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (file) setBackground(URL.createObjectURL(file));
+      cleanup();
+    };
+    document.body.appendChild(input);
+    input.click();
   };
 
   const pan = Gesture.Pan()
@@ -153,12 +218,24 @@ export function DevTools({ children }: { children: React.ReactNode }) {
         </Animated.View>
       </GestureDetector>
 
-      {/* fixed dev controls (not zoomed) */}
-      <View style={styles.devLayer} pointerEvents="box-none">
-        <Pressable onPress={() => setOpen((o) => !o)} style={styles.devToggle}>
-          <Text style={styles.devToggleText}>{open ? "✕" : "DEV"}</Text>
-          <GlassEdge radius={16} />
-        </Pressable>
+      {/* state-preview veils — the EXACT production components, above the page
+          and below the dev controls so they can always be toggled back off */}
+      {veil !== "none" && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          {veil === "loading" ? <LoadingVeil /> : <ErrorVeil />}
+        </View>
+      )}
+
+      {/* fixed dev controls (not zoomed; draggable via 1s hold on the chip) */}
+      <Animated.View style={[styles.devLayer, devLayerStyle]} pointerEvents="box-none">
+        <GestureDetector gesture={devDrag} touchAction="none">
+          <Animated.View style={chipStyle}>
+            <Pressable onPress={toggleOpen} style={styles.devToggle}>
+              <Text style={styles.devToggleText}>{open ? "✕" : "DEV"}</Text>
+              <GlassEdge radius={16} />
+            </Pressable>
+          </Animated.View>
+        </GestureDetector>
 
         {open ? (
           <View style={styles.panel}>
@@ -178,11 +255,27 @@ export function DevTools({ children }: { children: React.ReactNode }) {
 
             <View style={styles.btnRow}>
               <DevBtn label="Background" onPress={pickBackground} wide />
-              <DevBtn label="Clear" onPress={() => setBg(null)} />
+              <DevBtn label="Clear" onPress={() => setBackground(null)} />
+            </View>
+
+            {/* overlay the universal states on the live page (WAV-40) */}
+            <View style={styles.btnRow}>
+              <DevBtn
+                label="Loading"
+                active={veil === "loading"}
+                onPress={() => setVeil((v) => (v === "loading" ? "none" : "loading"))}
+                wide
+              />
+              <DevBtn
+                label="Error"
+                active={veil === "error"}
+                onPress={() => setVeil((v) => (v === "error" ? "none" : "error"))}
+                wide
+              />
             </View>
             <Text style={styles.hint}>
               {Platform.OS === "web"
-                ? "Zoom in, then scroll to pan • Ctrl/⌘+scroll zooms to cursor"
+                ? "Zoom in, then scroll to pan • Ctrl/⌘+scroll zooms to cursor • hold DEV 1s to drag it"
                 : inspect
                   ? "Drag to pan • pinch to zoom (UI paused)"
                   : "Turn Inspect on to pan/zoom"}
@@ -191,7 +284,7 @@ export function DevTools({ children }: { children: React.ReactNode }) {
             <GlassEdge radius={16} />
           </View>
         ) : null}
-      </View>
+      </Animated.View>
     </View>
   );
 }

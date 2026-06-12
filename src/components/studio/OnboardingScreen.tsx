@@ -11,11 +11,11 @@ import { PressableScale } from "./PressableScale";
 import { WavstractLogo } from "./WavstractLogo";
 import { AmbientGradient } from "./AmbientGradient";
 import {
-  AppleIcon, GoogleIcon, ChevronRightIcon, ErrorTriangleIcon,
+  AppleIcon, GoogleIcon, ChevronRightIcon,
   PlayTriangle, DownloadIcon,
 } from "./icons";
 import { COLORS, FONT, FRAME_W, panelSurface } from "./theme";
-import { LoadingBars, BlurVeil } from "./LoadingBars";
+import { LoadingVeil, ErrorVeil } from "./LoadingBars";
 import { useAuth } from "../../lib/use-auth";
 
 const LOGO_YT = require("./assets/logo-youtube.png");
@@ -166,30 +166,17 @@ export default function OnboardingScreen() {
             visible underneath a frosted veil — no black takeover */}
         {busy && !error && (
           <Animated.View entering={FadeIn.duration(200)} style={styles.stateLayer}>
-            <BlurVeil>
-              <LoadingBars size={28} />
-            </BlurVeil>
+            <LoadingVeil />
           </Animated.View>
         )}
         {!!error && (
           <Animated.View entering={FadeIn.duration(200)} style={styles.stateLayer}>
-            <BlurVeil>
-              <View style={styles.errorCenter}>
-                <ErrorTriangleIcon size={88} />
-                <Text style={styles.errorTitle}>ERROR</Text>
-                <Text style={styles.errorBody}>Something went wrong,{"\n"}Please try again later.</Text>
-                <PressableScale
-                  onPress={() => {
-                    clearError();
-                    setBusy(false);
-                  }}
-                  style={styles.retryBtn}
-                >
-                  <Text style={styles.retryLabel}>Retry</Text>
-                  <GlassEdge radius={16} />
-                </PressableScale>
-              </View>
-            </BlurVeil>
+            <ErrorVeil
+              onRetry={() => {
+                clearError();
+                setBusy(false);
+              }}
+            />
           </Animated.View>
         )}
       </View>
@@ -201,10 +188,14 @@ const styles = StyleSheet.create({
   full: { flex: 1, backgroundColor: COLORS.bg, alignItems: "center", justifyContent: "center" },
   frame: { flex: 1, width: "100%", maxWidth: FRAME_W, overflow: "hidden" },
 
-  logo: { position: "absolute", left: 20, top: 56 },
+  // Vertical anchors are the design positions as FRACTIONS of the 811pt Figma
+  // frame (WAV-42): exact 1:1 at the design height, and the whole composition
+  // keeps the comp's proportions on taller/shorter phones instead of the
+  // blocks drifting apart (logo 56/811, title 109/811, hero 178/811).
+  logo: { position: "absolute", left: 20, top: "6.9%" },
   // full frame width minus margins — "extracted instantly." must stay on ONE
   // line (two lines total)
-  title: { position: "absolute", left: 20, top: 109, width: 362, lineHeight: 40 * 0.96 + 4 },
+  title: { position: "absolute", left: 20, top: "13.44%", width: 362, lineHeight: 40 * 0.96 + 4 },
   titleBold: { fontFamily: FONT.geistSemibold, fontSize: 40, color: COLORS.white },
   titleItalic: {
     fontFamily: FONT.geistLight,
@@ -213,10 +204,10 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // hero geometry verbatim from Figma 236:200 (362×456) — vertically CENTERED
-  // in the frame (the design centers it on the phone, top 178 on an 811 frame)
+  // hero geometry verbatim from Figma 236:200 (362×456), parked at the
+  // design's proportional position (top 178 on the 811 frame = 21.95%)
   hero: {
-    position: "absolute", alignSelf: "center", top: "50%", marginTop: -228,
+    position: "absolute", alignSelf: "center", top: "21.95%",
     width: 362, height: 456,
   },
   iconCardBox: {
@@ -272,7 +263,8 @@ const styles = StyleSheet.create({
   mockSaveLabel: { fontFamily: FONT.sfSemibold, fontWeight: "600", fontSize: 12, color: COLORS.white },
 
   bottom: {
-    position: "absolute", left: 0, right: 0, bottom: 40,
+    // design inset 40/811 of the frame height — proportional like the rest
+    position: "absolute", left: 0, right: 0, bottom: "4.93%",
     alignItems: "center", gap: 16,
   },
   caption: {
@@ -295,20 +287,4 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5,
   },
   guestLabel: { fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "center" },
-
-  errorCenter: { alignItems: "center", gap: 10, paddingHorizontal: 40 },
-  errorTitle: {
-    fontFamily: FONT.geistSemibold, fontSize: 20, color: COLORS.danger,
-    letterSpacing: 1, marginTop: 6, textAlign: "center",
-  },
-  errorBody: {
-    fontFamily: FONT.geistRegular, fontSize: 16, color: COLORS.white,
-    textAlign: "center", lineHeight: 22,
-  },
-  retryBtn: {
-    marginTop: 14, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 16,
-    overflow: "hidden",
-    ...panelSurface,
-  },
-  retryLabel: { fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "center" },
 });
