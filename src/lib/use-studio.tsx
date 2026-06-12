@@ -42,6 +42,7 @@ import { useAuth } from "./use-auth";
 import * as cloud from "./cloud";
 import {
   saveLocalSound, listLocalSounds, patchLocalSound, deleteLocalSound,
+  localRowFile, LOCAL_PERSIST_MAX_BYTES,
   type LocalSoundRow,
 } from "./local-store";
 
@@ -104,7 +105,7 @@ function soundFromLocalRow(r: LocalSoundRow): Sound {
     source: null,
     sync: "local",
     mime: r.mime,
-    file: new File([r.blob], r.name, { type: r.mime ?? "" }),
+    file: localRowFile(r),
   };
 }
 
@@ -340,7 +341,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
             uploadInBackground(
               r.id,
               { name: r.name, duration: r.duration, peaks: r.peaks, cover: r.cover, favorite: r.favorite },
-              new File([r.blob], r.name, { type: r.mime ?? "" }),
+              localRowFile(r),
             );
           });
         })
@@ -391,19 +392,28 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         // does not start playing. Playback begins when the user presses the row.
         setSounds((prev) => [sound, ...prev]);
 
-        // Persist on-device (WAV-44): guests get a durable library; signed-in
-        // rows keep the local copy only until the upload lands.
-        saveLocalSound({
-          id,
-          name: sound.name,
-          duration,
-          peaks,
-          favorite: false,
-          cover: null,
-          mime: file.type || null,
-          blob: file,
-          createdAt: Date.now(),
-        }).catch(() => {});
+        // Persist on-device (WAV-44/52): guests get a durable library;
+        // signed-in rows keep the local copy only until the upload lands.
+        // Serialized as an ArrayBuffer — Blobs in iOS IndexedDB can come back
+        // unreadable after a reload. Oversized videos stay session-only.
+        if (file.size <= LOCAL_PERSIST_MAX_BYTES) {
+          file
+            .arrayBuffer()
+            .then((data) =>
+              saveLocalSound({
+                id,
+                name: sound.name,
+                duration,
+                peaks,
+                favorite: false,
+                cover: null,
+                mime: file.type || null,
+                data,
+                createdAt: Date.now(),
+              }),
+            )
+            .catch(() => {});
+        }
 
         extractCover(file)
           .then((cover) => {
@@ -467,6 +477,9 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     (id: string, keepPosition = false) => {
       const sound = sounds.find((s) => s.id === id);
       if (!sound) return;
+      // synchronously, while the tap's user-activation is alive (WAV-52) —
+      // the local/cloud paths below decode async before actually playing
+      player.warmup();
       if (activeId === id && sound.source) {
         player.toggle();
         if (!player.isPlaying && !keepPosition) player.seek(0);

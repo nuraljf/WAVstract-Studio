@@ -491,6 +491,15 @@ class Player {
     return this.rate;
   }
 
+  /** Poke the audio pipeline synchronously inside a user gesture — iOS only
+   *  honors play() while the tap's activation is alive, and the local/cloud
+   *  paths decode asynchronously before actually playing (WAV-52). */
+  warmup() {
+    if (!isAudioSupported) return;
+    unlockIOS();
+    void getCtx().resume();
+  }
+
   /** Current playback position in seconds (rate-aware). */
   get currentTime(): number {
     if (this.mode === "element") {
