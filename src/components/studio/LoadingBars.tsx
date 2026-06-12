@@ -8,6 +8,10 @@ import Animated, {
   Easing, cancelAnimation,
 } from "react-native-reanimated";
 import { AmbientGradient } from "./AmbientGradient";
+import { GlassEdge } from "./Glass";
+import { PressableScale } from "./PressableScale";
+import { ErrorTriangleIcon } from "./icons";
+import { COLORS, FONT, panelSurface } from "./theme";
 
 // Geometry from the Figma asset (24×24): five rounded bars of varying height.
 const BAR_W = 3 / 24;
@@ -108,6 +112,33 @@ export function BlurVeil({ children }: { children: React.ReactNode }) {
   return <View style={styles.veil}>{children}</View>;
 }
 
+/** The universal busy state (Figma 237:761): bars centered on the veil.
+ *  One component so onboarding and the DevTools state preview match exactly. */
+export function LoadingVeil() {
+  return (
+    <BlurVeil>
+      <LoadingBars size={28} />
+    </BlurVeil>
+  );
+}
+
+/** The universal failed state (Figma 238:1328) — shared for the same reason. */
+export function ErrorVeil({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <BlurVeil>
+      <View style={styles.errorCenter}>
+        <ErrorTriangleIcon size={88} />
+        <Text style={styles.errorTitle}>ERROR</Text>
+        <Text style={styles.errorBody}>Something went wrong,{"\n"}Please try again later.</Text>
+        <PressableScale onPress={onRetry} style={styles.retryBtn}>
+          <Text style={styles.retryLabel}>Retry</Text>
+          <GlassEdge radius={16} />
+        </PressableScale>
+      </View>
+    </BlurVeil>
+  );
+}
+
 /** Full-screen boot takeover — the living gradient under the frosted veil
  *  with the bars centered, matching the loading-state design language. */
 export function LoadingScreen() {
@@ -131,4 +162,20 @@ const styles = StyleSheet.create({
       ? ({ backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)" } as object)
       : ({ backgroundColor: "rgba(5,5,5,0.8)" } as object)),
   },
+
+  errorCenter: { alignItems: "center", gap: 10, paddingHorizontal: 40 },
+  errorTitle: {
+    fontFamily: FONT.geistSemibold, fontSize: 20, color: COLORS.danger,
+    letterSpacing: 1, marginTop: 6, textAlign: "center",
+  },
+  errorBody: {
+    fontFamily: FONT.geistRegular, fontSize: 16, color: COLORS.white,
+    textAlign: "center", lineHeight: 22,
+  },
+  retryBtn: {
+    marginTop: 14, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 16,
+    overflow: "hidden",
+    ...panelSurface,
+  },
+  retryLabel: { fontFamily: FONT.geistMedium, fontSize: 16, color: COLORS.white, textAlign: "center" },
 });

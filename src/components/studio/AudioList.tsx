@@ -345,6 +345,15 @@ export function ListRow({
     open.value = withSpring(0, SPRING.snappy);
   }, [open]);
 
+  // On web, a Pressable does NOT cancel its press when the pointer drags
+  // horizontally inside it — releasing a mouse swipe lands a CLICK on the row,
+  // whose handler (close / play) instantly undid the swipe (WAV-37). Presses
+  // arriving on the heels of pan activity are drag releases, not taps.
+  const lastSwipeAt = React.useRef(0);
+  const markSwipe = React.useCallback(() => {
+    lastSwipeAt.current = Date.now();
+  }, []);
+
   // Ghost heart (favorite UX): on favoriting, a copy of the heart pops out of
   // the button — swells, floats up and dissolves.
   const ghost = useSharedValue(1);
@@ -376,6 +385,7 @@ export function ListRow({
         .shouldCancelWhenOutside(false)
         .onStart(() => {
           start.value = open.value;
+          runOnJS(markSwipe)();
         })
         .onUpdate((e) => {
           const raw = start.value - e.translationX / REVEAL;
@@ -389,6 +399,7 @@ export function ListRow({
           const projected = open.value - (e.velocityX * 0.15) / REVEAL;
           const opening = start.value < 0.5 ? projected > 0.3 : projected > 0.7;
           open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
+          runOnJS(markSwipe)(); // the release click follows within ms
         })
         .onFinalize((_e, success) => {
           if (!success) {
@@ -398,7 +409,7 @@ export function ListRow({
             open.value = withSpring(open.value > threshold ? 1 : 0, SPRING.snappy);
           }
         }),
-    [busy, open, start],
+    [busy, open, start, markSwipe],
   );
 
   const baseStyle = useAnimatedStyle(() => ({
@@ -486,7 +497,11 @@ export function ListRow({
             playing={!!playing}
             editing={editing}
             editProgress={open}
-            onPlay={editing ? close : p.onPlay}
+            onPlay={() => {
+              if (Date.now() - lastSwipeAt.current < 350) return; // drag release
+              if (editing) close();
+              else p.onPlay?.();
+            }}
             onHoverIn={() => setHovered(true)}
             onHoverOut={() => setHovered(false)}
           />

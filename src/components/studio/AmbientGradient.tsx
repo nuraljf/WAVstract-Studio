@@ -16,15 +16,34 @@ import { player, syntheticLevels } from "../../lib/audio-engine";
 
 const web = Platform.OS === "web";
 
-const blob = (size: number, rgba: string): ViewStyle =>
+// `fade` stretches the falloff stops — the gradient's soft edge IS its "layer
+// blur", so 1.25 reads as a 25% larger blur radius without a CSS filter (a
+// real filter would re-rasterize these per-frame-scaled layers, WAV-41).
+const blob = (size: number, rgba: string, fade = 1): ViewStyle =>
   ({
     position: "absolute",
     width: size,
     height: size,
     borderRadius: size / 2,
     ...(web
-      ? { backgroundImage: `radial-gradient(circle, ${rgba} 0%, rgba(26,98,255,0) 68%)` }
+      ? { backgroundImage: `radial-gradient(circle, ${rgba} 0%, rgba(26,98,255,0) ${Math.min(68 * fade, 98)}%)` }
       : { backgroundColor: rgba, opacity: 0.35 }),
+  }) as ViewStyle;
+
+// the main glow — a soft ellipse hugging the anchored edge, transparent
+// everywhere else (no black plate behind it)
+const glowLayer = (anchor: "top" | "bottom", k: number, fade: number): ViewStyle =>
+  ({
+    position: "absolute",
+    left: -70 * k,
+    right: -70 * k,
+    height: 440 * k,
+    ...(anchor === "top" ? { top: -90 * k } : { bottom: -90 * k }),
+    ...(web
+      ? {
+          backgroundImage: `radial-gradient(72% 88% at 50% ${anchor === "top" ? "0%" : "100%"}, rgba(26,98,255,0.85) 0%, rgba(26,98,255,0.30) ${46 * fade}%, rgba(26,98,255,0) ${Math.min(74 * fade, 98)}%)`,
+        }
+      : { backgroundColor: "rgba(26,98,255,0.22)", borderRadius: (440 * k) / 2 }),
   }) as ViewStyle;
 
 export function AmbientGradient({
@@ -42,6 +61,12 @@ export function AmbientGradient({
 }) {
   // energy pushes the layers AWAY from the anchored edge
   const dir = anchor === "top" ? 1 : -1;
+
+  // WAV-41: the studio's reactive glow runs 50% bigger (sizes, offsets AND
+  // motion amplitudes, so the character scales with it) with a 25% longer
+  // falloff. The onboarding glow keeps the design geometry untouched.
+  const K = reactive ? 1.5 : 1;
+  const FADE = reactive ? 1.25 : 1;
 
   // --- ambient drift (always running; transform-only). Roomy enough to be
   // clearly alive, slow enough to stay out of the way. ---
@@ -109,8 +134,8 @@ export function AmbientGradient({
   // base glow: breathing + swelling with the bass
   const baseStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: dir * (drift.value * 26 + bass.value * 22) },
-      { translateX: (wander.value - 0.5) * 44 },
+      { translateY: dir * (drift.value * 26 + bass.value * 22) * K },
+      { translateX: (wander.value - 0.5) * 44 * K },
       { scaleX: 1.02 + drift.value * 0.07 + bass.value * 0.14 },
       { scaleY: 1.0 + sway.value * 0.08 + bass.value * 0.2 },
     ],
@@ -119,8 +144,8 @@ export function AmbientGradient({
   // left blob: mids — pushes out and grows on melody
   const blobAStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: (0.5 - wander.value) * 90 - 20 },
-      { translateY: dir * (drift.value * 34 + mid.value * 52) },
+      { translateX: ((0.5 - wander.value) * 90 - 20) * K },
+      { translateY: dir * (drift.value * 34 + mid.value * 52) * K },
       { scale: 0.85 + sway.value * 0.18 + mid.value * 0.45 },
     ],
   }));
@@ -128,21 +153,24 @@ export function AmbientGradient({
   // right blob: treble — quick shimmer
   const blobBStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: (wander.value - 0.5) * 80 + 20 },
-      { translateY: dir * ((1 - drift.value) * 30 + treble.value * 44) },
+      { translateX: ((wander.value - 0.5) * 80 + 20) * K },
+      { translateY: dir * ((1 - drift.value) * 30 + treble.value * 44) * K },
       { scale: 0.8 + (1 - drift.value) * 0.2 + treble.value * 0.5 },
     ],
   }));
 
-  const edge = anchor === "top" ? styles.glowTop : styles.glowBottom;
-  const aEdge = anchor === "top" ? { top: 40 } : { bottom: 60 };
-  const bEdge = anchor === "top" ? { top: -30 } : { bottom: -20 };
+  const aEdge = anchor === "top" ? { top: 40 * K } : { bottom: 60 * K };
+  const bEdge = anchor === "top" ? { top: -30 * K } : { bottom: -20 * K };
 
   return (
     <Animated.View pointerEvents="none" style={[styles.wrap, containerStyle, style]}>
-      <Animated.View style={[styles.glow, edge, baseStyle]} />
-      <Animated.View style={[blob(360, "rgba(26,98,255,0.5)"), styles.blobA, aEdge, blobAStyle]} />
-      <Animated.View style={[blob(300, "rgba(86,150,255,0.42)"), styles.blobB, bEdge, blobBStyle]} />
+      <Animated.View style={[glowLayer(anchor, K, FADE), baseStyle]} />
+      <Animated.View
+        style={[blob(360 * K, "rgba(26,98,255,0.5)", FADE), { left: -60 * K }, aEdge, blobAStyle]}
+      />
+      <Animated.View
+        style={[blob(300 * K, "rgba(86,150,255,0.42)", FADE), { right: -50 * K }, bEdge, blobBStyle]}
+      />
     </Animated.View>
   );
 }
@@ -152,32 +180,4 @@ const styles = StyleSheet.create({
     position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
     overflow: "hidden",
   },
-  // the main glow — a soft ellipse hugging the anchored edge, transparent
-  // everywhere else (no black plate behind it)
-  glow: {
-    position: "absolute", left: -70, right: -70, height: 440,
-    ...(web
-      ? ({} as object)
-      : ({ backgroundColor: "rgba(26,98,255,0.22)", borderRadius: 220 } as object)),
-  },
-  glowBottom: {
-    bottom: -90,
-    ...(web
-      ? ({
-          backgroundImage:
-            "radial-gradient(72% 88% at 50% 100%, rgba(26,98,255,0.85) 0%, rgba(26,98,255,0.30) 46%, rgba(26,98,255,0) 74%)",
-        } as object)
-      : null),
-  },
-  glowTop: {
-    top: -90,
-    ...(web
-      ? ({
-          backgroundImage:
-            "radial-gradient(72% 88% at 50% 0%, rgba(26,98,255,0.85) 0%, rgba(26,98,255,0.30) 46%, rgba(26,98,255,0) 74%)",
-        } as object)
-      : null),
-  },
-  blobA: { left: -60 },
-  blobB: { right: -50 },
 });

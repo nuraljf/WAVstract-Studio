@@ -57,8 +57,10 @@ function RollChar({
     ],
   }));
   // Old glyph: continues past in the same direction, fades + scales down.
+  // The fade runs at 2x the roll progress — fully gone by halfway — so the
+  // incoming glyph never visibly overlaps it (WAV-39).
   const leaving = useAnimatedStyle(() => ({
-    opacity: 1 - p.value,
+    opacity: Math.max(0, 1 - p.value * 2),
     transform: [
       { translateY: -p.value * d.value * travel },
       { scale: 1 - p.value * 0.1 },
