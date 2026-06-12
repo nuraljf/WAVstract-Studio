@@ -2,7 +2,7 @@
 // viewBox / size the design specifies so swapping in a different icon set
 // later won't shift layout.
 import React from "react";
-import Svg, { Path, G } from "react-native-svg";
+import Svg, { Path, G, Defs, Mask, Rect, Circle } from "react-native-svg";
 import svgPaths from "./svgPaths";
 import { COLORS } from "./theme";
 
@@ -181,11 +181,22 @@ export function SignOutIcon({ size = 24, color = COLORS.white }: IconProps) {
 
 // Rounded warning triangle + exclamation (auth ERROR screen, Figma 238:1328).
 export function ErrorTriangleIcon({ size = 88, color = COLORS.danger }: IconProps) {
+  // The "!" is CUT OUT of the triangle via a mask — fully transparent, so the
+  // frosted veil shows through it instead of a painted dark glyph (WAV-45).
+  // Cutout geometry mirrors the old strokes: 7px round-cap bar 30→50, 8px
+  // round dot at 60.75.
   return (
     <Svg width={size} height={(size * 78) / 88} viewBox="0 0 88 78" fill="none">
-      <Path d="M44 10 L78 68 H10 Z" fill={color} stroke={color} strokeWidth={16} strokeLinejoin="round" />
-      <Path d="M44 30 V50" stroke="#050505" strokeWidth={7} strokeLinecap="round" />
-      <Path d="M44 60.5 V61" stroke="#050505" strokeWidth={8} strokeLinecap="round" />
+      <Defs>
+        <Mask id="bangCut" maskUnits="userSpaceOnUse" x={0} y={0} width={88} height={78}>
+          <Rect width={88} height={78} fill="#fff" />
+          <Rect x={40.5} y={26.5} width={7} height={27} rx={3.5} fill="#000" />
+          <Circle cx={44} cy={60.75} r={4} fill="#000" />
+        </Mask>
+      </Defs>
+      <G mask="url(#bangCut)">
+        <Path d="M44 10 L78 68 H10 Z" fill={color} stroke={color} strokeWidth={16} strokeLinejoin="round" />
+      </G>
     </Svg>
   );
 }

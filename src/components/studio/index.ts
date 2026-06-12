@@ -17,3 +17,4 @@ export * from "./icons";
 export * from "./theme";
 export { StudioProvider, useStudio, fmtTime, fmtTimePad, type Sound } from "../../lib/use-studio";
 export { AuthProvider, useAuth } from "../../lib/use-auth";
+export { PageTransition } from "./PageTransition";
