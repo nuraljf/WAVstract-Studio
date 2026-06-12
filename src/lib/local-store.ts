@@ -16,9 +16,22 @@ export type LocalSoundRow = {
   favorite: boolean;
   cover: string | null; // data URL
   mime: string | null;
-  blob: Blob; // the original picked file (plays + uploads from here)
+  // Audio bytes as a SERIALIZED ArrayBuffer (WAV-52): iOS WebKit stores Blobs
+  // in IndexedDB as file references that can come back unreadable in a later
+  // session — which is why restored rows wouldn't play on the phone.
+  data?: ArrayBuffer;
+  blob?: Blob; // legacy rows written by the first WAV-44 build
   createdAt: number;
 };
+
+/** Don't serialize enormous videos into the DB — those rows stay session-only. */
+export const LOCAL_PERSIST_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Rebuild a playable/uploadable File from whichever shape the row carries. */
+export function localRowFile(r: LocalSoundRow): File {
+  const bits: BlobPart[] = r.data ? [r.data] : r.blob ? [r.blob] : [];
+  return new File(bits, r.name, { type: r.mime ?? "" });
+}
 
 const DB_NAME = "wavstract-local";
 const STORE = "sounds";

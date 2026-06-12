@@ -361,6 +361,30 @@ export function ListRow({
     ghost.value = 0;
     ghost.value = withTiming(1, { duration: 650, easing: Easing.out(Easing.quad) });
   }, [ghost]);
+
+  // Heartbeat (WAV-53): favoriting squeezes the heart down then springs it
+  // back with a bouncy overshoot as it turns red — the ghost floats off above
+  // it. Unfavoriting is just a quiet dip.
+  const beat = useSharedValue(1);
+  const beatStyle = useAnimatedStyle(() => ({ transform: [{ scale: beat.value }] }));
+  const pressFavorite = React.useCallback(() => {
+    if (!p.favorite) {
+      popGhost();
+      beat.value = withSequence(
+        withTiming(0.6, { duration: 90, easing: Easing.out(Easing.quad) }),
+        withSpring(1.3, SPRING.bouncy),
+        withSpring(1, SPRING.snappy),
+      );
+    } else {
+      beat.value = withSequence(
+        withTiming(0.85, { duration: 80, easing: Easing.out(Easing.quad) }),
+        withSpring(1, SPRING.snappy),
+      );
+    }
+    onFavorite?.();
+    close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p.favorite, onFavorite, close, popGhost, beat]);
   const ghostStyle = useAnimatedStyle(() => ({
     opacity: ghost.value >= 1 ? 0 : 1 - ghost.value,
     transform: [
@@ -454,19 +478,11 @@ export function ListRow({
         {/* heart: hidden under the base card until the delete pill breaks
             off, then it slides out into the opening gap */}
         <Animated.View style={[styles.heartHolder, heartStyle]}>
-          <PressableScale
-            onPress={() => {
-              if (!p.favorite) popGhost(); // becoming a favorite → ghost pop
-              onFavorite?.();
-              close();
-            }}
-            style={styles.favoriteCircle}
-          >
-            {/* White @80% = not favorited; the heart takes its full red only
-                once the sound IS a favorite (WAV-25). */}
-            <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
+          <PressableScale onPress={pressFavorite} style={styles.favoriteCircle}>
+            {/* Full white un-favorited; red once it IS a favorite (WAV-53). */}
+            <Animated.View style={beatStyle}>
               <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
-            </View>
+            </Animated.View>
             <Animated.View pointerEvents="none" style={[styles.ghostHeart, ghostStyle]}>
               <HeartIcon size={20} color={COLORS.danger} />
             </Animated.View>
