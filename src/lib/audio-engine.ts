@@ -220,6 +220,158 @@ export function computePeaks(buffer: AudioBuffer, count = 90): number[] {
   return max > 0 ? peaks.map((p) => p / max) : peaks;
 }
 
+// ---- Element-source band analysis (WAV-33) ----------------------------------
+// iOS/macOS Safari has no HTMLMediaElement.captureStream(), so element/video
+// sources there never get a live analyser — rows danced to the synthetic
+// groove instead of the actual audio. Fallback: decode the file's audio track
+// ONCE in the background (decodeAudioData demuxes most video containers'
+// audio), precompute a coarse per-band energy timeline, and let levels()
+// sample it at the element's live position. The same decode also yields the
+// REAL waveform peaks, replacing the synthetic sparkline for video sources.
+
+type BandTimeline = {
+  bands: number;
+  bucketSec: number;
+  buckets: number;
+  data: Float32Array; // [bucket * bands + band], normalized 0..1
+  peaks: number[]; // real 90-bar waveform from the decoded PCM
+};
+
+const ANALYSIS_BANDS = 9;
+const ANALYSIS_BUCKET_SEC = 0.08; // ~12.5 buckets/s — beat-level resolution
+const ANALYSIS_MAX_BYTES = 100 * 1024 * 1024; // never read a huge video into RAM
+const ANALYSIS_MAX_BYTES_BLIND = 25 * 1024 * 1024; // unknown duration = stricter
+const ANALYSIS_MAX_DURATION = 15 * 60; // decoded PCM is ~23MB/min — cap it
+
+// Keyed by source object-URL, so re-selecting the same Sound costs nothing.
+// "failed" sticks: undecodable codecs aren't re-attempted every play.
+const analysisCache = new Map<string, BandTimeline | "pending" | "failed">();
+
+/** 9 parallel RBJ bandpass filters (log-spaced ~55Hz → ~11kHz) + per-bucket
+ *  RMS, normalized per band. Chunked with setTimeout yields — this runs WHILE
+ *  the sound is playing and must never hitch the UI. */
+async function bandTimelineFromBuffer(buffer: AudioBuffer): Promise<BandTimeline> {
+  const n = buffer.length;
+  const sr = buffer.sampleRate;
+  const B = ANALYSIS_BANDS;
+
+  const mono = new Float32Array(n);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const ch = buffer.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += ch[i];
+  }
+  if (buffer.numberOfChannels > 1) {
+    const inv = 1 / buffer.numberOfChannels;
+    for (let i = 0; i < n; i++) mono[i] *= inv;
+  }
+
+  const buckets = Math.max(1, Math.ceil(buffer.duration / ANALYSIS_BUCKET_SEC));
+  const perBucket = sr * ANALYSIS_BUCKET_SEC;
+  const data = new Float32Array(buckets * B);
+  const counts = new Float32Array(buckets);
+
+  // RBJ bandpass coefficients (constant skirt, Q 0.9 → wide musical bands)
+  const cb0 = new Float64Array(B), cb2 = new Float64Array(B);
+  const ca1 = new Float64Array(B), ca2 = new Float64Array(B);
+  for (let b = 0; b < B; b++) {
+    const fc = Math.min(55 * Math.pow(2, (b * 7.65) / (B - 1)), sr * 0.45);
+    const w0 = (2 * Math.PI * fc) / sr;
+    const alpha = Math.sin(w0) / (2 * 0.9);
+    const a0 = 1 + alpha;
+    cb0[b] = alpha / a0;
+    cb2[b] = -alpha / a0;
+    ca1[b] = (-2 * Math.cos(w0)) / a0;
+    ca2[b] = (1 - alpha) / a0;
+  }
+  const x1 = new Float64Array(B), x2 = new Float64Array(B);
+  const y1 = new Float64Array(B), y2 = new Float64Array(B);
+
+  const CHUNK = 65536; // ~1.4s of 48k audio ≈ a few ms of work per slice
+  for (let s = 0; s < n; s += CHUNK) {
+    const end = Math.min(s + CHUNK, n);
+    for (let i = s; i < end; i++) {
+      const x = mono[i];
+      let k = (i / perBucket) | 0;
+      if (k >= buckets) k = buckets - 1;
+      counts[k]++;
+      const row = k * B;
+      for (let b = 0; b < B; b++) {
+        const y = cb0[b] * x + cb2[b] * x2[b] - ca1[b] * y1[b] - ca2[b] * y2[b];
+        x2[b] = x1[b];
+        x1[b] = x;
+        y2[b] = y1[b];
+        y1[b] = y;
+        data[row + b] += y * y;
+      }
+    }
+    await new Promise<void>((r) => setTimeout(r, 0));
+  }
+
+  // bucket RMS → per-band 95th-percentile normalize → perceptual lift
+  for (let b = 0; b < B; b++) {
+    const col = new Float32Array(buckets);
+    for (let k = 0; k < buckets; k++) {
+      col[k] = counts[k] > 0 ? Math.sqrt(data[k * B + b] / counts[k]) : 0;
+    }
+    const sorted = Float32Array.from(col).sort();
+    const ref = sorted[Math.min(buckets - 1, Math.floor(buckets * 0.95))] || 0;
+    for (let k = 0; k < buckets; k++) {
+      const v = ref > 0 ? Math.min(col[k] / ref, 1) : 0;
+      data[k * B + b] = Math.pow(v, 0.75);
+    }
+  }
+
+  return {
+    bands: B,
+    bucketSec: ANALYSIS_BUCKET_SEC,
+    buckets,
+    data,
+    peaks: computePeaks(buffer, 90),
+  };
+}
+
+/** Bilinear sample (time × band) of the timeline, resampled to n bars. */
+function sampleBandTimeline(tl: BandTimeline, t: number, n: number): number[] {
+  const pos = Math.max(0, t) / tl.bucketSec;
+  let k0 = pos | 0;
+  if (k0 > tl.buckets - 1) k0 = tl.buckets - 1;
+  const k1 = Math.min(tl.buckets - 1, k0 + 1);
+  const tf = Math.min(1, Math.max(0, pos - k0));
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = n > 1 ? (i * (tl.bands - 1)) / (n - 1) : 0;
+    const b0 = p | 0;
+    const b1 = Math.min(tl.bands - 1, b0 + 1);
+    const bf = p - b0;
+    const v0 = tl.data[k0 * tl.bands + b0] * (1 - bf) + tl.data[k0 * tl.bands + b1] * bf;
+    const v1 = tl.data[k1 * tl.bands + b0] * (1 - bf) + tl.data[k1 * tl.bands + b1] * bf;
+    out.push(v0 + (v1 - v0) * tf);
+  }
+  return out;
+}
+
+/** Downsample an analyser's frequency bins to n bars (0..1) + the raw peak. */
+function readFreq(
+  analyser: AnalyserNode,
+  freq: Uint8Array<ArrayBuffer>,
+  n: number,
+): { bars: number[]; peak: number } {
+  analyser.getByteFrequencyData(freq);
+  const step = Math.max(1, Math.floor(freq.length / n));
+  const bars: number[] = [];
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    let m = 0;
+    for (let j = 0; j < step; j++) {
+      const v = freq[i * step + j] ?? 0;
+      if (v > m) m = v;
+    }
+    if (m > peak) peak = m;
+    bars.push(m / 255);
+  }
+  return { bars, peak };
+}
+
 /**
  * Cover art: first frame of a video file, else null (caller shows the music
  * glyph). Returns a data URL. Web only.
@@ -302,6 +454,11 @@ class Player {
   private elFreq: Uint8Array<ArrayBuffer> | null = null;
   private elTapLive = false; // any real signal observed yet?
 
+  // Precomputed band timeline (WAV-33) — the live-meter source on browsers
+  // without captureStream (iOS/macOS Safari). Sampled at el.currentTime.
+  private elAnalysis: BandTimeline | null = null;
+  private elUrl: string | null = null;
+
   private gain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
   private freq: Uint8Array<ArrayBuffer> | null = null;
@@ -320,6 +477,9 @@ class Player {
   // pipeline (loadedmetadata/durationchange). The upfront metadata probe can be
   // wrong/zero on iOS, which made the timeline outlive the audio (WAV-22).
   onDuration: DurationCb | null = null;
+  // Fired when background analysis of an element source completes — hands the
+  // REAL waveform peaks to whoever owns the sound list (WAV-33).
+  onPeaks: ((url: string, peaks: number[]) => void) | null = null;
 
   get duration(): number {
     return this.mode === "element" ? this.elDuration : (this.buffer?.duration ?? 0);
@@ -358,9 +518,46 @@ class Player {
   }
 
   /** Whether levels() is currently producing REAL data — buffer sources
-   *  always, element sources once the captureStream tap has seen signal. */
+   *  always, element sources once the captureStream tap has seen signal OR
+   *  the background band analysis has landed (WAV-33). */
   get hasLiveLevels(): boolean {
-    return this.mode === "buffer" || this.elTapLive;
+    return this.mode === "buffer" || this.elTapLive || this.elAnalysis !== null;
+  }
+
+  /** Kick (or adopt) the background analysis for an element source. Cached
+   *  per object-URL: re-selecting the same Sound costs nothing. */
+  private startElementAnalysis(url: string, knownDuration: number) {
+    const cached = analysisCache.get(url);
+    if (cached === "pending" || cached === "failed") return;
+    if (cached) {
+      this.adoptAnalysis(url, cached);
+      return;
+    }
+    if (knownDuration > ANALYSIS_MAX_DURATION) {
+      analysisCache.set(url, "failed");
+      return;
+    }
+    analysisCache.set(url, "pending");
+    void (async () => {
+      try {
+        const blob = await (await fetch(url)).blob();
+        const cap = knownDuration > 0 ? ANALYSIS_MAX_BYTES : ANALYSIS_MAX_BYTES_BLIND;
+        if (blob.size > cap) throw new Error("file too large to analyze");
+        const buffer = await decodeAudioData(getCtx(), await blob.arrayBuffer());
+        if (buffer.duration > ANALYSIS_MAX_DURATION) throw new Error("too long");
+        const tl = await bandTimelineFromBuffer(buffer);
+        analysisCache.set(url, tl);
+        this.adoptAnalysis(url, tl);
+      } catch {
+        // undecodable container/codec or too big — the synthetic meter stays
+        analysisCache.set(url, "failed");
+      }
+    })();
+  }
+
+  private adoptAnalysis(url: string, tl: BandTimeline) {
+    if (this.elUrl === url) this.elAnalysis = tl;
+    this.onPeaks?.(url, tl.peaks);
   }
 
   /** Try to attach the read-only analyser tap to the playing element. Audio
@@ -389,34 +586,23 @@ class Player {
    *  idle or when no analyser is available (callers fall back to synthetic). */
   levels(n = 9): number[] {
     if (!this.playing) return [];
-    let analyser: AnalyserNode | null;
-    let freq: Uint8Array<ArrayBuffer> | null;
     if (this.mode === "element") {
-      analyser = this.elAnalyser;
-      freq = this.elFreq;
-    } else {
-      analyser = this.analyser;
-      freq = this.freq;
-    }
-    if (!analyser || !freq) return [];
-    analyser.getByteFrequencyData(freq);
-    const bins = freq.length;
-    const step = Math.max(1, Math.floor(bins / n));
-    const out: number[] = [];
-    let peak = 0;
-    for (let i = 0; i < n; i++) {
-      let m = 0;
-      for (let j = 0; j < step; j++) {
-        const v = freq[i * step + j] ?? 0;
-        if (v > m) m = v;
+      // captureStream tap first (Chrome/Firefox) — only trusted once it has
+      // demonstrably carried signal: some browsers expose a silent stream.
+      if (this.elAnalyser && this.elFreq) {
+        const { bars, peak } = readFreq(this.elAnalyser, this.elFreq, n);
+        if (peak > 10) this.elTapLive = true;
+        if (this.elTapLive) return bars;
       }
-      if (m > peak) peak = m;
-      out.push(m / 255);
+      // No tap (iOS/macOS Safari): ride the precomputed band timeline at the
+      // element's live position — real reactivity without a live pipeline.
+      if (this.elAnalysis && this.el) {
+        return sampleBandTimeline(this.elAnalysis, this.el.currentTime, n);
+      }
+      return [];
     }
-    // The element tap is only trusted once it has demonstrably carried signal
-    // (some browsers expose a silent stream) — until then callers keep synth.
-    if (this.mode === "element" && peak > 10) this.elTapLive = true;
-    return out;
+    if (!this.analyser || !this.freq) return [];
+    return readFreq(this.analyser, this.freq, n).bars;
   }
 
   /** Load a new source (resets position to 0, stops any current playback). */
@@ -437,6 +623,10 @@ class Player {
     this.mode = "element";
     this.buffer = null;
     this.elDuration = source.duration;
+    this.elUrl = source.url;
+    // band timeline for the live meter where captureStream doesn't exist
+    // (cached per URL — repeat selections are free)
+    this.startElementAnalysis(source.url, source.duration);
 
     const el = document.createElement("video");
     el.preload = "auto";
@@ -621,6 +811,8 @@ class Player {
     this.elAnalyser = null;
     this.elFreq = null;
     this.elTapLive = false;
+    this.elAnalysis = null;
+    this.elUrl = null;
     try {
       this.el.pause();
       this.el.onended = null;

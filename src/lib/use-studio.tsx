@@ -183,9 +183,19 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
         ),
       );
     };
+    // Background analysis of an element/video source finished (WAV-33) — swap
+    // the synthetic sparkline for the file's REAL waveform wherever it shows.
+    player.onPeaks = (url, peaks) => {
+      setSounds((prev) =>
+        prev.map((s) =>
+          s.source?.kind === "element" && s.source.url === url ? { ...s, peaks } : s,
+        ),
+      );
+    };
     return () => {
       player.onEnded = null;
       player.onDuration = null;
+      player.onPeaks = null;
       stopTicker();
     };
   }, [stopTicker, syncPosition]);

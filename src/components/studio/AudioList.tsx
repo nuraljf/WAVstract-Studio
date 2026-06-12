@@ -313,6 +313,7 @@ const FAV_W = 40;
 const DEL_W = 100;
 const AGAP = 10;
 const REVEAL = FAV_W + AGAP + DEL_W + AGAP; // width the base card gives up
+const SPLIT_AT = 0.55; // swipe progress where the joined delete pill breaks off
 
 // Data-driven row. The glass "selected" surface shows while playing, hovered
 // (WAV-17) or in the swipe-open editing state (WAV-24); otherwise it's the
@@ -381,13 +382,20 @@ export function ListRow({
           open.value = raw < 0 ? 0 : raw > 1.12 ? 1.12 : raw; // rubber past fully-open
         })
         .onEnd((e) => {
-          const opening = e.velocityX < -300 || (open.value > 0.5 && e.velocityX < 300);
+          // iOS-style commit (WAV-34): carry the release momentum into a
+          // projected resting point, then bias the threshold toward CHANGING
+          // state — a slow half-way mouse drag locks open (no flick needed)
+          // and a short drag back closes just as easily.
+          const projected = open.value - (e.velocityX * 0.15) / REVEAL;
+          const opening = start.value < 0.5 ? projected > 0.3 : projected > 0.7;
           open.value = withSpring(opening ? 1 : 0, SPRING.snappy);
         })
         .onFinalize((_e, success) => {
           if (!success) {
-            // gesture cancelled before onEnd — always finish to a resting state
-            open.value = withSpring(open.value > 0.5 ? 1 : 0, SPRING.snappy);
+            // gesture cancelled before onEnd — finish to a resting state with
+            // the same change-friendly bias (no velocity available here)
+            const threshold = start.value < 0.5 ? 0.3 : 0.7;
+            open.value = withSpring(open.value > threshold ? 1 : 0, SPRING.snappy);
           }
         }),
     [busy, open, start],
@@ -396,18 +404,32 @@ export function ListRow({
   const baseStyle = useAnimatedStyle(() => ({
     marginRight: Math.min(open.value, 1.12) * REVEAL,
   }));
-  // Liquid-glass reveal (no fades, WAV-31): the buttons sit at their final
-  // spots "behind" the base, and the clip window is EXACTLY the strip the base
-  // has vacated — never wider, so nothing shows through the translucent glass
-  // card. Swiping uncovers them in place, like iOS notification actions.
+  // Liquid-glass reveal (no fades, WAV-31): the clip window is EXACTLY the
+  // strip the base card has vacated — never wider, so nothing shows through
+  // the translucent glass card.
   const windowStyle = useAnimatedStyle(() => ({
     width: Math.min(open.value, 1.12) * REVEAL,
   }));
-  // The heart starts FUSED to the delete pill (gap closed) and breaks off once
-  // the swipe commits — the "disconnect" moment of the liquid glass look.
+  // Connected reveal (WAV-36): the delete pill GROWS out of the base card's
+  // trailing edge — until the swipe commits it fills the vacated strip
+  // edge-to-edge, one joined slab whose radius-16 corners pinch against the
+  // base like the iOS liquid-glass notification actions. Past SPLIT_AT it
+  // breaks off to its final 100px slot while the heart slides out from under
+  // the base into the opening gap. In the rubber zone past fully-open, the
+  // pill absorbs all the extra stretch.
+  const splitOf = (v: number) => {
+    "worklet";
+    return Math.min(Math.max((v - SPLIT_AT) / (1 - SPLIT_AT), 0), 1);
+  };
+  const deleteStyle = useAnimatedStyle(() => {
+    const w = Math.min(open.value, 1.12) * REVEAL;
+    return { width: Math.max(w - splitOf(open.value) * (FAV_W + AGAP * 2), 0) };
+  });
   const heartStyle = useAnimatedStyle(() => {
-    const split = Math.min(Math.max((open.value - 0.55) / 0.45, 0), 1);
-    return { transform: [{ translateX: (1 - split) * AGAP }] };
+    const w = Math.min(open.value, 1.12) * REVEAL;
+    const split = splitOf(open.value);
+    const deleteW = Math.max(w - split * (FAV_W + AGAP * 2), 0);
+    return { right: deleteW + split * AGAP };
   });
 
   return (
@@ -418,33 +440,38 @@ export function ListRow({
       style={[styles.rowOuter, styles.rowSwipeOuter, p.style]}
     >
       <Animated.View style={[styles.actionsWrap, windowStyle]} pointerEvents={editing ? "auto" : "none"}>
-        <View style={styles.actionsRow}>
-          <Animated.View style={heartStyle}>
-            <PressableScale
-              onPress={() => {
-                if (!p.favorite) popGhost(); // becoming a favorite → ghost pop
-                onFavorite?.();
-                close();
-              }}
-              style={styles.favoriteCircle}
-            >
-              {/* White @80% = not favorited; the heart takes its full red only
-                  once the sound IS a favorite (WAV-25). */}
-              <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
-                <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
-              </View>
-              <Animated.View pointerEvents="none" style={[styles.ghostHeart, ghostStyle]}>
-                <HeartIcon size={20} color={COLORS.danger} />
-              </Animated.View>
-              <GlassEdge radius={34} />
-            </PressableScale>
-          </Animated.View>
+        {/* heart: hidden under the base card until the delete pill breaks
+            off, then it slides out into the opening gap */}
+        <Animated.View style={[styles.heartHolder, heartStyle]}>
+          <PressableScale
+            onPress={() => {
+              if (!p.favorite) popGhost(); // becoming a favorite → ghost pop
+              onFavorite?.();
+              close();
+            }}
+            style={styles.favoriteCircle}
+          >
+            {/* White @80% = not favorited; the heart takes its full red only
+                once the sound IS a favorite (WAV-25). */}
+            <View style={{ opacity: p.favorite ? 1 : 0.8 }}>
+              <HeartIcon size={20} color={p.favorite ? COLORS.danger : COLORS.white} />
+            </View>
+            <Animated.View pointerEvents="none" style={[styles.ghostHeart, ghostStyle]}>
+              <HeartIcon size={20} color={COLORS.danger} />
+            </Animated.View>
+            <GlassEdge radius={34} />
+          </PressableScale>
+        </Animated.View>
+        {/* delete: width-driven so its left edge rides the base card's edge */}
+        <Animated.View style={[styles.deleteHolder, deleteStyle]}>
           <PressableScale onPress={onDelete} style={styles.deleteBtn}>
-            <TrashIcon size={24} />
-            <Text style={styles.deleteLabel}>Delete</Text>
+            <View style={styles.deleteContent}>
+              <TrashIcon size={24} />
+              <Text style={styles.deleteLabel} numberOfLines={1}>Delete</Text>
+            </View>
             <GlassEdge radius={16} />
           </PressableScale>
-        </View>
+        </Animated.View>
       </Animated.View>
 
       {/* touchAction pan-y: the browser keeps native VERTICAL scrolling even
@@ -520,7 +547,7 @@ export function ListRowEditing({
         <GlassEdge radius={34} />
       </PressableScale>
 
-      <PressableScale onPress={onDelete} style={styles.deleteBtn}>
+      <PressableScale onPress={onDelete} style={styles.deleteBtnStatic}>
         <TrashIcon size={24} />
         <Text style={styles.deleteLabel}>Delete</Text>
         <GlassEdge radius={16} />
@@ -598,9 +625,15 @@ const styles = StyleSheet.create({
     position: "absolute", right: 0, top: 0, bottom: 0,
     overflow: "hidden",
   },
-  actionsRow: {
+  // each action is its own absolute layer inside the window — the delete
+  // pill's WIDTH (not position) animates so it stays joined to the base card
+  heartHolder: {
+    position: "absolute", top: 0, bottom: 0, width: FAV_W,
+    justifyContent: "center",
+  },
+  deleteHolder: {
     position: "absolute", right: 0, top: 0, bottom: 0,
-    flexDirection: "row", alignItems: "center", gap: AGAP,
+    justifyContent: "center",
   },
 
   // uploading / failed row states (Figma 244:3632 / 244:3716)
@@ -646,6 +679,19 @@ const styles = StyleSheet.create({
     position: "absolute", top: 10, left: 10, // over the resting heart (40px chip, 20px icon)
   },
   deleteBtn: {
+    flex: 1, height: "100%",
+    borderRadius: 16, overflow: "hidden",
+    ...dangerSurface,
+  },
+  // pinned at the final pill's content offset and clipped while the pill
+  // grows — the trash leads out of the base edge, the label follows
+  deleteContent: {
+    position: "absolute", left: 12, top: 0, bottom: 0,
+    flexDirection: "row", alignItems: "center", gap: 5,
+  },
+  // static design-reference variant (ListRowEditing / DevTools) keeps the
+  // fixed-width pill the swipe row used to share
+  deleteBtnStatic: {
     width: DEL_W, height: "100%",
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5,
     padding: 10,
