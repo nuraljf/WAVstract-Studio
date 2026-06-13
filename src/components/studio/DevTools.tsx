@@ -9,10 +9,10 @@ import { View, Text, Image, Pressable, Platform, StyleSheet } from "react-native
 import Animated, {
   useSharedValue, useAnimatedStyle, withTiming,
 } from "react-native-reanimated";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { GlassEdge } from "./Glass";
 import { LoadingVeil, ErrorVeil } from "./LoadingBars";
 import { COLORS, FONT, panelSurface } from "./theme";
+import { useDevMode } from "../../lib/use-dev-mode";
 
 const MIN_Z = 1;
 const MAX_Z = 5;
@@ -23,8 +23,8 @@ const MAX_Z = 5;
 let bgInput: HTMLInputElement | null = null;
 
 export function DevTools({ children }: { children: React.ReactNode }) {
+  const { devVisible } = useDevMode();
   const [open, setOpen] = useState(false);
-  const [inspect, setInspect] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [bg, setBg] = useState<string | null>(null);
   // state-preview veils (WAV-40): overlay the production loading / error
@@ -34,8 +34,6 @@ export function DevTools({ children }: { children: React.ReactNode }) {
   const scale = useSharedValue(1);
   const panX = useSharedValue(0);
   const panY = useSharedValue(0);
-  const startX = useSharedValue(0);
-  const startY = useSharedValue(0);
   const rootRef = useRef<any>(null);
 
   // swap (or clear) the dev background, releasing the previous object URL
@@ -197,26 +195,6 @@ export function DevTools({ children }: { children: React.ReactNode }) {
     input.click();
   };
 
-  const pan = Gesture.Pan()
-    .enabled(inspect)
-    .onBegin(() => {
-      startX.value = panX.value;
-      startY.value = panY.value;
-    })
-    .onUpdate((e) => {
-      panX.value = startX.value + e.translationX;
-      panY.value = startY.value + e.translationY;
-    });
-
-  const pinch = Gesture.Pinch()
-    .enabled(inspect)
-    .onChange((e) => {
-      const next = Math.min(Math.max(scale.value * e.scaleChange, MIN_Z), MAX_Z);
-      scale.value = next;
-    });
-
-  const gesture = Gesture.Simultaneous(pan, pinch);
-
   const contentStyle = useAnimatedStyle(() => ({
     transform: [
       { translateX: panX.value },
@@ -225,15 +203,18 @@ export function DevTools({ children }: { children: React.ReactNode }) {
     ],
   }));
 
+  // Hidden via the Settings toggle (e.g. while showcasing): bypass the whole
+  // inspector so no zoom/inspect/veil state can strand the UI — just render the
+  // app. All hooks above still run, so toggling back on restores cleanly.
+  if (!devVisible) return <View style={styles.root}>{children}</View>;
+
   return (
     <View ref={rootRef} style={styles.root}>
       {bg ? <Image source={{ uri: bg }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : null}
 
-      <GestureDetector gesture={gesture}>
-        <Animated.View style={[styles.content, contentStyle]} pointerEvents={inspect ? "none" : "auto"}>
-          {children}
-        </Animated.View>
-      </GestureDetector>
+      <Animated.View style={[styles.content, contentStyle]}>
+        {children}
+      </Animated.View>
 
       {/* state-preview veils — the EXACT production components, above the page
           and below the dev controls so they can always be toggled back off */}
@@ -274,13 +255,6 @@ export function DevTools({ children }: { children: React.ReactNode }) {
               <DevBtn label="Reset" onPress={reset} wide />
             </View>
 
-            <DevBtn
-              label={inspect ? "Inspect: ON" : "Inspect: OFF"}
-              onPress={() => setInspect((v) => !v)}
-              active={inspect}
-              full
-            />
-
             <View style={styles.btnRow}>
               <DevBtn label="Background" onPress={pickBackground} wide />
               <DevBtn label="Clear" onPress={() => setBackground(null)} />
@@ -304,9 +278,7 @@ export function DevTools({ children }: { children: React.ReactNode }) {
             <Text style={styles.hint}>
               {Platform.OS === "web"
                 ? "Zoom in, then scroll to pan • Ctrl/⌘+scroll zooms to cursor • hold DEV 1s to drag it"
-                : inspect
-                  ? "Drag to pan • pinch to zoom (UI paused)"
-                  : "Turn Inspect on to pan/zoom"}
+                : "Pinch the page to zoom • hold DEV 1s to drag it"}
             </Text>
 
             <GlassEdge radius={16} />

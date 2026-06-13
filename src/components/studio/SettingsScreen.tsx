@@ -7,10 +7,12 @@ import { GlassEdge } from "./Glass";
 import { PressableScale } from "./PressableScale";
 import {
   UserGlyphIcon, DisplayNameIcon, DownloadsCloudIcon, FeedbackIcon,
-  SignOutIcon, ChevronRightIcon,
+  SignOutIcon, ChevronRightIcon, CodeIcon,
 } from "./icons";
+import { Toggle } from "./Toggle";
 import { COLORS, FONT, panelSurface, dangerSurface, accentSurface } from "./theme";
 import { useAuth } from "../../lib/use-auth";
+import { useDevMode } from "../../lib/use-dev-mode";
 
 function displayNameOf(meta: Record<string, unknown> | undefined, email: string | null): string {
   const m = meta ?? {};
@@ -22,6 +24,7 @@ function displayNameOf(meta: Record<string, unknown> | undefined, email: string 
 
 export default function SettingsScreen() {
   const { session, guest, signOut } = useAuth();
+  const { devVisible, setDevVisible } = useDevMode();
   const email = session?.user.email ?? null;
   const name = displayNameOf(session?.user.user_metadata, email);
 
@@ -63,6 +66,15 @@ export default function SettingsScreen() {
           <ChevronRightIcon size={24} />
         </View>
       </PressableScale>
+
+      {/* show / hide the temporary DEV inspector chip — flip off when showcasing */}
+      <View style={styles.row}>
+        <CodeIcon size={24} />
+        <Text style={styles.rowLabel}>Developer mode</Text>
+        <View style={styles.rowTail}>
+          <Toggle value={devVisible} onChange={setDevVisible} />
+        </View>
+      </View>
 
       {/* sign out (signed in) / sign in (guest) */}
       <PressableScale onPress={() => void signOut()} style={[styles.actionBtn, guest ? styles.signInBtn : styles.signOutBtn]}>

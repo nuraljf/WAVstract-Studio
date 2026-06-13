@@ -77,6 +77,32 @@ export async function downloadSound(filePath: string, mime: string | null): Prom
   return mime ? new Blob([data], { type: mime }) : data;
 }
 
+/**
+ * Resolve a pasted video link (TikTok / Instagram) to its downloadable media
+ * via the `extract-media` Edge Function, then fetch the bytes (WAV-58). The
+ * download has to be server-side — the browser can't fetch TikTok/IG media
+ * directly (CORS + anti-bot). Returns the media Blob ready to decode.
+ *
+ * Requires the `extract-media` function to be deployed; until then `invoke`
+ * rejects and the Library screen shows a friendly error.
+ */
+export async function extractMediaFromUrl(
+  url: string,
+): Promise<{ blob: Blob; name: string; mime: string }> {
+  const { data, error } = await supabase.functions.invoke<{
+    audioUrl: string;
+    name: string;
+    mime: string;
+  }>("extract-media", { body: { url } });
+  if (error) throw new Error(error.message || "Link extraction isn't available yet.");
+  if (!data?.audioUrl) throw new Error("Couldn't find audio in that link.");
+
+  const res = await fetch(data.audioUrl);
+  if (!res.ok) throw new Error("Couldn't download the audio from that link.");
+  const blob = await res.blob();
+  return { blob, name: data.name || "Extracted audio", mime: data.mime || blob.type || "video/mp4" };
+}
+
 export async function setFavorite(id: string, favorite: boolean): Promise<void> {
   const { error } = await supabase.from("sounds").update({ favorite }).eq("id", id);
   if (error) throw error;

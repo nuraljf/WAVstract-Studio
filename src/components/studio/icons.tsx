@@ -179,6 +179,29 @@ export function SignOutIcon({ size = 24, color = COLORS.white }: IconProps) {
   );
 }
 
+// Chain-link glyph — the Library "paste a link" bar (WAV-58).
+export function LinkIcon({ size = 20, color = COLORS.white }: IconProps) {
+  const stroke = { stroke: color, strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path d="M10 13a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1.5 1.5" {...stroke} />
+      <Path d="M14 11a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1.5-1.5" {...stroke} />
+    </Svg>
+  );
+}
+
+// "</>" code glyph — marks the Developer-mode row in Settings.
+export function CodeIcon({ size = 24, color = COLORS.white }: IconProps) {
+  const stroke = { stroke: color, strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path d="M8.5 7.5 4 12 8.5 16.5" {...stroke} />
+      <Path d="M15.5 7.5 20 12 15.5 16.5" {...stroke} />
+      <Path d="M13.5 5.5 10.5 18.5" {...stroke} />
+    </Svg>
+  );
+}
+
 // Rounded warning triangle + exclamation (auth ERROR screen, Figma 238:1328).
 export function ErrorTriangleIcon({ size = 88, color = COLORS.danger }: IconProps) {
   // The "!" is CUT OUT of the triangle via a mask — fully transparent, so the

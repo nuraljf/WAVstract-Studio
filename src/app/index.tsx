@@ -1,6 +1,6 @@
 import {
   AuthProvider, useAuth,
-  DevTools, StudioScreen, StudioProvider, OnboardingScreen, LoadingScreen,
+  DevTools, DevModeProvider, StudioScreen, StudioProvider, OnboardingScreen, LoadingScreen,
   PageTransition,
 } from '@/components/studio';
 
@@ -18,9 +18,11 @@ function Gate() {
         <OnboardingScreen />
       ) : (
         <StudioProvider>
-          <DevTools>
-            <StudioScreen />
-          </DevTools>
+          <DevModeProvider>
+            <DevTools>
+              <StudioScreen />
+            </DevTools>
+          </DevModeProvider>
         </StudioProvider>
       )}
     </PageTransition>

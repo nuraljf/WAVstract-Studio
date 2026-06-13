@@ -7,3 +7,19 @@
   --font-rounded: 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif;
   --font-serif: Georgia, 'Times New Roman', serif;
 }
+
+/* The app is dark to the edges. Without this the browser/PWA body is white, so
+   the iOS overscroll bounce and the area behind the home indicator flashed
+   white bars at the top/bottom of the app (WAV: bottom white bar fix). */
+html,
+body,
+#root {
+  margin: 0;
+  background-color: #050505;
+}
+
+#root {
+  /* fill the dynamic viewport so the dark background reaches the safe areas
+     even when content is shorter than the screen */
+  min-height: 100dvh;
+}

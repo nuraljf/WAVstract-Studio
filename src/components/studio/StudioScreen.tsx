@@ -8,6 +8,7 @@ import SpeedSlider from "./SpeedSlider";
 import { FiltersRow, ListRow, EmptyTable } from "./AudioList";
 import TabBar, { type TabKey } from "./TabBar";
 import SettingsScreen from "./SettingsScreen";
+import LibraryScreen from "./LibraryScreen";
 import { AmbientGradient } from "./AmbientGradient";
 import { PageTransition } from "./PageTransition";
 import { GlassEdge } from "./Glass";
@@ -155,8 +156,8 @@ export default function StudioScreen() {
               <SettingsScreen />
             </View>
           ) : (
-            <View style={[styles.page, styles.centerPage]}>
-              <Text style={styles.empty}>Library is coming soon.</Text>
+            <View style={styles.page}>
+              <LibraryScreen />
             </View>
           )}
         </PageTransition>

@@ -78,6 +78,8 @@ type StudioState = {
   timelineSound: Sound | null;
   activeSound: Sound | null;
   extract: () => void;
+  /** Extract audio from a pasted video link (TikTok / Instagram). Rejects on failure. */
+  extractFromUrl: (url: string) => Promise<void>;
   togglePlay: (id: string, keepPosition?: boolean) => void;
   addToTimeline: (id: string) => void;
   removeSound: (id: string) => void;
@@ -354,6 +356,68 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   }, [userId, resetPlayback, uploadInBackground]);
 
   // ---- actions ----
+  // Shared ingestion: decode a media File (picked OR fetched from a link), add
+  // its row instantly, persist on-device, resolve cover, and upload — the common
+  // tail of both `extract` (file picker) and `extractFromUrl` (WAV-58). Cover art
+  // is resolved separately and patched in so a slow/failed thumbnail (common on
+  // iOS) never blocks the row from appearing (WAV-16 follow-up).
+  const ingestFile = useCallback(
+    async (file: File, displayName: string) => {
+      const id = nextId();
+      const { source, duration, peaks } = await extractAudio(file);
+      const signedIn = !!userIdRef.current;
+      const sound: Sound = {
+        id,
+        name: displayName,
+        peaks,
+        duration,
+        cover: null,
+        favorite: false,
+        source,
+        sync: signedIn ? "uploading" : "local",
+        mime: file.type || null,
+        file: signedIn ? file : undefined,
+      };
+      // WAV-17: the row appears in its UNSELECTED state — playback begins only
+      // when the user presses the row.
+      setSounds((prev) => [sound, ...prev]);
+
+      // Persist on-device (WAV-44/52): guests get a durable library; signed-in
+      // rows keep the local copy only until the upload lands. Serialized as an
+      // ArrayBuffer — iOS IndexedDB Blobs can come back unreadable after a
+      // reload. Oversized videos stay session-only.
+      if (file.size <= LOCAL_PERSIST_MAX_BYTES) {
+        file
+          .arrayBuffer()
+          .then((data) =>
+            saveLocalSound({
+              id,
+              name: displayName,
+              duration,
+              peaks,
+              favorite: false,
+              cover: null,
+              mime: file.type || null,
+              data,
+              createdAt: Date.now(),
+            }),
+          )
+          .catch(() => {});
+      }
+
+      extractCover(file)
+        .then((cover) => {
+          if (!cover) return;
+          setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, cover } : s)));
+          patchLocalSound(id, { cover }).catch(() => {});
+        })
+        .catch(() => {});
+
+      if (signedIn) uploadInBackground(id, sound, file);
+    },
+    [uploadInBackground],
+  );
+
   const extract = useCallback(() => {
     if (!isAudioSupported || typeof document === "undefined") return;
     fileInput?.remove();
@@ -370,64 +434,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       const file = input.files?.[0];
       if (!file) return cleanup();
       try {
-        // Add the row as soon as the audio is ready. Cover art is resolved
-        // separately and patched in — a slow/failed thumbnail (common on iOS)
-        // must never block the upload from appearing (WAV-16 follow-up).
-        const id = nextId();
-        const { source, duration, peaks } = await extractAudio(file);
-        const signedIn = !!userIdRef.current;
-        const sound: Sound = {
-          id,
-          name: baseName(file.name),
-          peaks,
-          duration,
-          cover: null,
-          favorite: false,
-          source,
-          sync: signedIn ? "uploading" : "local",
-          mime: file.type || null,
-          file: signedIn ? file : undefined,
-        };
-        // WAV-17: extraction only adds the row in its UNSELECTED state — it
-        // does not start playing. Playback begins when the user presses the row.
-        setSounds((prev) => [sound, ...prev]);
-
-        // Persist on-device (WAV-44/52): guests get a durable library;
-        // signed-in rows keep the local copy only until the upload lands.
-        // Serialized as an ArrayBuffer — Blobs in iOS IndexedDB can come back
-        // unreadable after a reload. Oversized videos stay session-only.
-        if (file.size <= LOCAL_PERSIST_MAX_BYTES) {
-          file
-            .arrayBuffer()
-            .then((data) =>
-              saveLocalSound({
-                id,
-                name: sound.name,
-                duration,
-                peaks,
-                favorite: false,
-                cover: null,
-                mime: file.type || null,
-                data,
-                createdAt: Date.now(),
-              }),
-            )
-            .catch(() => {});
-        }
-
-        extractCover(file)
-          .then((cover) => {
-            if (!cover) return;
-            setSounds((prev) => prev.map((s) => (s.id === id ? { ...s, cover } : s)));
-            patchLocalSound(id, { cover }).catch(() => {});
-          })
-          .catch(() => {});
-
-        if (signedIn) {
-          // Cover may not be ready yet — upload metadata with what we have;
-          // the row cover is local-first anyway. (Cover lands next upload.)
-          uploadInBackground(id, sound, file);
-        }
+        await ingestFile(file, baseName(file.name));
       } catch (err) {
         console.error("[studio] decode failed", err);
       } finally {
@@ -436,7 +443,25 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     };
     document.body.appendChild(input);
     input.click();
-  }, [uploadInBackground]);
+  }, [ingestFile]);
+
+  // Extract audio straight from a pasted video link (TikTok / Instagram, WAV-58).
+  // The download + audio isolation happen server-side (the extract-media Edge
+  // Function); here we just decode the returned media and ingest it like any
+  // other clip. Throws on failure so the Library screen can surface the message.
+  const extractFromUrl = useCallback(
+    async (rawUrl: string) => {
+      if (!isAudioSupported || typeof document === "undefined") return;
+      const url = rawUrl.trim();
+      if (!url) return;
+      const { blob, name, mime } = await cloud.extractMediaFromUrl(url);
+      const file = new File([blob], name || "Extracted audio", {
+        type: mime || blob.type || "video/mp4",
+      });
+      await ingestFile(file, name || "Extracted audio");
+    },
+    [ingestFile],
+  );
 
   const retryUpload = useCallback(
     (id: string) => {
@@ -636,6 +661,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       timelineSound,
       activeSound,
       extract,
+      extractFromUrl,
       togglePlay,
       addToTimeline,
       removeSound,
@@ -646,7 +672,7 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       sounds, activeId, timelineId, isPlaying, position, positionSV, speed,
-      cloudLoading, timelineSound, activeSound, extract, togglePlay,
+      cloudLoading, timelineSound, activeSound, extract, extractFromUrl, togglePlay,
       addToTimeline, removeSound, toggleFavorite, retryUpload, seek, setSpeed,
     ],
   );
