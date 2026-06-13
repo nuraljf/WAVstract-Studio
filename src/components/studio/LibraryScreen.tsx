@@ -3,6 +3,7 @@
 // full sound library (the same rows as the studio table).
 import React from "react";
 import { View, Text, TextInput, ScrollView, StyleSheet } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ListRow, EmptyTable } from "./AudioList";
 import { PressableScale } from "./PressableScale";
 import { GlassEdge } from "./Glass";
@@ -17,6 +18,7 @@ export default function LibraryScreen() {
     extractFromUrl, togglePlay, addToTimeline, removeSound, toggleFavorite, retryUpload,
   } = useStudio();
 
+  const insets = useSafeAreaInsets();
   const [url, setUrl] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -72,7 +74,7 @@ export default function LibraryScreen() {
 
       {/* the library list — same rows as the studio table */}
       <View style={styles.listBox}>
-        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+        <ScrollView contentContainerStyle={[styles.listContent, { paddingBottom: 120 + insets.bottom }]} showsVerticalScrollIndicator={false}>
           {sounds.length === 0 ? (
             cloudLoading ? (
               <View style={styles.loading}><LoadingBars size={24} /></View>

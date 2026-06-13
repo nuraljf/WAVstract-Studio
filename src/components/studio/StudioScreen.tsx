@@ -2,7 +2,8 @@
 // slider, extract button and filters stay put; ONLY the audio list scrolls
 // (Figma 244:3575), fading out under the bottom edge effect + tab bar.
 import React, { useState } from "react";
-import { View, ScrollView, Text, StyleSheet, SafeAreaView, Platform } from "react-native";
+import { View, ScrollView, Text, StyleSheet, Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Timeline from "./Timeline";
 import SpeedSlider from "./SpeedSlider";
 import { FiltersRow, ListRow, EmptyTable } from "./AudioList";
@@ -54,6 +55,7 @@ const SoundRow = React.memo(function SoundRow({
 });
 
 function StudioTab() {
+  const insets = useSafeAreaInsets();
   const {
     sounds, activeId, isPlaying, position, positionSV, timelineSound, supported, cloudLoading,
     extract, togglePlay, addToTimeline, removeSound, toggleFavorite, retryUpload, seek, setSpeed,
@@ -98,7 +100,7 @@ function StudioTab() {
           {/* the ONLY scrollable region — the audio list */}
           <ScrollView
             style={styles.listScroll}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[styles.listContent, { paddingBottom: 120 + insets.bottom }]}
             showsVerticalScrollIndicator={false}
           >
             {sounds.length === 0 ? (
@@ -136,46 +138,55 @@ function StudioTab() {
 
 export default function StudioScreen() {
   const [tab, setTab] = useState<TabKey>("studio");
+  const insets = useSafeAreaInsets();
   const { timelineSound, activeId, isPlaying } = useStudio();
   const timelinePlaying = !!timelineSound && timelineSound.id === activeId && isPlaying;
 
   return (
-    <SafeAreaView style={styles.safe}>
-      {/* Phone-width frame, centered (so the web preview matches the device). */}
+    <View style={styles.safe}>
+      {/* Phone-width frame, centered (so the web preview matches the device).
+          Full-bleed top→bottom: the gradient and the edge fade reach the real
+          screen edges, while only the content + tab bar are inset from the
+          status bar / home indicator (WAV: no black bars or bottom gap). */}
       <View style={styles.frame}>
         {/* audio-reactive glow (WAV-30): hugs the TOP edge in the studio,
             appears only while the timeline's sound is playing, and its layers
             ride the live band energies */}
         {tab === "studio" && <AmbientGradient reactive anchor="top" playing={timelinePlaying} />}
-        {/* tab pages resize in through the shared blur transition (WAV-47) */}
-        <PageTransition id={tab}>
-          {tab === "studio" ? (
-            <StudioTab />
-          ) : tab === "settings" ? (
-            <View style={styles.page}>
-              <SettingsScreen />
-            </View>
-          ) : (
-            <View style={styles.page}>
-              <LibraryScreen />
-            </View>
-          )}
-        </PageTransition>
+        {/* tab pages resize in through the shared blur transition (WAV-47);
+            padded below the status bar / notch */}
+        <View style={[styles.pageHolder, { paddingTop: insets.top }]}>
+          <PageTransition id={tab}>
+            {tab === "studio" ? (
+              <StudioTab />
+            ) : tab === "settings" ? (
+              <View style={styles.page}>
+                <SettingsScreen />
+              </View>
+            ) : (
+              <View style={styles.page}>
+                <LibraryScreen />
+              </View>
+            )}
+          </PageTransition>
+        </View>
 
-        {/* bottom edge effect (Figma 244:3572): content fades + blurs away
-            under the floating tab bar */}
-        <View pointerEvents="none" style={styles.edgeFade} />
-        <View style={styles.tabBarHolder} pointerEvents="box-none">
+        {/* bottom edge effect (Figma 244:3572): content fades + blurs away under
+            the floating tab bar. ALWAYS anchored to the true bottom and grown by
+            the safe-area inset so it never leaves a gap / black bar below it. */}
+        <View pointerEvents="none" style={[styles.edgeFade, { height: 84 + insets.bottom }]} />
+        <View style={[styles.tabBarHolder, { bottom: 20 + insets.bottom }]} pointerEvents="box-none">
           <TabBar active={tab} onChange={setTab} />
         </View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "transparent" },
   frame: { flex: 1, width: "100%", maxWidth: FRAME_W, alignSelf: "center" },
+  pageHolder: { flex: 1, minHeight: 0 },
 
   studio: { flex: 1, paddingHorizontal: 20, paddingTop: 20, gap: 30 },
   page: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
@@ -206,7 +217,7 @@ const styles = StyleSheet.create({
   },
 
   edgeFade: {
-    position: "absolute", left: 0, right: 0, bottom: 0, height: 84,
+    position: "absolute", left: 0, right: 0, bottom: 0,
     ...(Platform.OS === "web"
       ? ({
           backgroundImage: "linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.65) 100%)",
@@ -219,7 +230,7 @@ const styles = StyleSheet.create({
   },
 
   tabBarHolder: {
-    position: "absolute", left: 0, right: 0, bottom: 20,
+    position: "absolute", left: 0, right: 0,
     alignItems: "center",
   },
 });
